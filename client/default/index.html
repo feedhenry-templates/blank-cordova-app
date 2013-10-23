@@ -1,0 +1,45 @@
+<!DOCTYPE HTML>
+<html manifest="" lang="en-US">
+    <head>
+
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+        <meta name="format-detection" content="telephone=no" />
+        <link rel="stylesheet" href="style.css" type="text/css">
+        <script src="cordova-2.2.0.js"></script>
+        <script src="js/feedhenry.js"></script>
+        <meta charset="UTF-8">
+        <title>Decoupled Build </title>
+        <script>
+          // Init the FH JS SDK
+          $fh.init({
+            "host": "https://psdev.feedhenry.com",
+            "appid": "tW5zCC9ZBF5vdQWgd2En2pt4",
+            "appkey": "6c1c58dba74fc64d1ba56d3c954b268248ce7104",
+            "mode" : "dev"
+          }, function(res) {
+            alert(JSON.stringify(res));
+          }, function(msg, err) {
+            alert(msg + JSON.stringify(err));
+          });
+
+
+
+          function doAct(){
+            $fh.act(
+                {
+                  act: "echo",
+                  req : { "echo" : 'Hello World' }
+                }, function(res){
+                  alert(JSON.stringify(res));
+                }, function(err){
+                  alert(JSON.stringify(err));
+                }
+            )
+          }
+        </script>
+    </head>
+    <body>
+        <h1>Decoupled Client hello world</h1>
+        <h2><a href="Javascript: doAct();">Do an act!</a></h2>
+    </body>
+</html>
