@@ -17,7 +17,7 @@
        under the License.
  */
 
-package %appid%;
+package %id%;
 
 import android.os.Bundle;
 import org.apache.cordova.*;
