@@ -1,0 +1,6 @@
+{
+  "name": "Blank Advanced Hybrid Client",
+  "type": "client_advanced_hybrid",
+  "repoUrl": "https://github.com/feedhenry/fh-advanced-hybrid-blank-app.git",
+  "repoBranch": "refs/heads/5202-ngui-template-configs"
+}
