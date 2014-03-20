@@ -11,7 +11,7 @@
 /resources/docs
 /docs/*
 node_modules
-fhc*
+fhc-*
 client/default/archive
 ios/www/*
 android/assets/www/*
