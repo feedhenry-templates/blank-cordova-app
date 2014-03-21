@@ -17,7 +17,7 @@
  under the License.
  */
 //
-// Prefix header for all source files of the 'Test' target in the 'Test' project
+// Prefix header for all source files of the 'MainApp' target in the 'MainApp' project
 //
 
 #ifdef __OBJC__
