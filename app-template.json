@@ -1,9 +1,0 @@
-{
-  "id": "blank_advanced_hybrid_client",
-  "name": "Blank Advanced Hybrid Client",
-  "type": "client_advanced_hybrid",
-  "repoUrl": "git://github.com/feedhenry/fh-advanced-hybrid-blank-app.git",
-  "repoBranch": "refs/heads/6066-connection-bugfixing",
-  "icon": "icon-html5",
-  "category": "Blank Apps"
-}
