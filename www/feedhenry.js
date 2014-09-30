@@ -3703,11 +3703,16 @@ Lawnchair.adapter('window-name', (function() {
  */
 //
 // TODO does it make sense to be chainable all over the place?
-// chainable: nuke, remove, all, get, save, all
+// chainable: nuke, remove, all, get, save, all    
 // not chainable: valid, keys
 //
 Lawnchair.adapter('dom', (function() {
-  var storage = window.localStorage
+  var storage = null;
+  try{
+    storage = window.localStorage;
+  }catch(e){
+
+  }
   // the indexer is an encapsulation of the helpers needed to keep an ordered index of the keys
   var indexer = function(name) {
     return {
@@ -3910,19 +3915,6 @@ Lawnchair.adapter('webkit-sqlite', (function() {
       return new Date()
     } // FIXME need to use better date fn
     // not entirely sure if this is needed...
-  if (!Function.prototype.bind) {
-    Function.prototype.bind = function(obj) {
-      var slice = [].slice,
-        args = slice.call(arguments, 1),
-        self = this,
-        nop = function() {}, bound = function() {
-          return self.apply(this instanceof nop ? this : (obj || {}), args.concat(slice.call(arguments)))
-        }
-      nop.prototype = self.prototype
-      bound.prototype = new nop()
-      return bound
-    }
-  }
 
   // public methods
   return {
@@ -4116,6 +4108,440 @@ Lawnchair.adapter('webkit-sqlite', (function() {
       return this
     }
   }
+})());
+Lawnchair.adapter('html5-filesystem', (function(global){
+
+  var FileError = global.FileError;
+
+  var fail = function( e ) {
+    var msg;
+    var show = true;
+    switch (e.code) {
+      case FileError.QUOTA_EXCEEDED_ERR:
+        msg = 'QUOTA_EXCEEDED_ERR';
+        break;
+      case FileError.NOT_FOUND_ERR:
+        msg = 'NOT_FOUND_ERR';
+        show = false;
+        break;
+      case FileError.SECURITY_ERR:
+        msg = 'SECURITY_ERR';
+        break;
+      case FileError.INVALID_MODIFICATION_ERR:
+        msg = 'INVALID_MODIFICATION_ERR';
+        break;
+      case FileError.INVALID_STATE_ERR:
+        msg = 'INVALID_STATE_ERR';
+        break;
+      default:
+        msg = 'Unknown Error';
+        break;
+    };
+    if ( console && show ) console.error( e, msg );
+  };
+
+  var ls = function( reader, callback, entries ) {
+    var result = entries || [];
+    reader.readEntries(function( results ) {
+      if ( !results.length ) {
+        if ( callback ) callback( result.map(function(entry) { return entry.name; }) );
+      } else {
+        ls( reader, callback, result.concat( Array.prototype.slice.call( results ) ) );
+      }
+    }, fail );
+  };
+
+  var filesystems = {};
+
+  var root = function( store, callback ) {
+    var directory = filesystems[store.name];
+    if ( directory ) {
+      callback( directory );
+    } else {
+      setTimeout(function() {
+        root( store, callback );
+      }, 10 );
+    }
+  };
+
+  var isPhoneGap = function() {
+    //http://stackoverflow.com/questions/10347539/detect-between-a-mobile-browser-or-a-phonegap-application
+    //may break.
+    var app = document.URL.indexOf('http://') === -1 && document.URL.indexOf('https://') === -1;
+    if (app) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  var createBlobOrString = function(contentstr) {
+    var retVal;
+    if (isPhoneGap()) {  // phonegap filewriter works with strings, later versions also work with binary arrays, and if passed a blob will just convert to binary array anyway
+      retVal = contentstr;
+    } else {
+      var targetContentType = 'application/json';
+      try {
+        retVal = new Blob( [contentstr], { type: targetContentType });  // Blob doesn't exist on all androids
+      }
+      catch (e){
+        // TypeError old chrome and FF
+        var blobBuilder = window.BlobBuilder ||
+          window.WebKitBlobBuilder ||
+          window.MozBlobBuilder ||
+          window.MSBlobBuilder;
+        if (e.name == 'TypeError' && blobBuilder) {
+          var bb = new blobBuilder();
+          bb.append([contentstr.buffer]);
+          retVal = bb.getBlob(targetContentType);
+        } else {
+          // We can't make a Blob, so just return the stringified content
+          retVal = contentstr;
+        }
+      }
+    }
+    return retVal;
+  }
+
+  return {
+    // boolean; true if the adapter is valid for the current environment
+    valid: function() {
+      var fs = global.requestFileSystem || global.webkitRequestFileSystem || global.moz_requestFileSystem;
+      return !!fs;
+    },
+
+    // constructor call and callback. 'name' is the most common option
+    init: function( options, callback ) {
+      var me = this;
+      var error = function(e) { fail(e); if ( callback ) me.fn( me.name, callback ).call( me, me ); };
+      var size = options.size || 100*1024*1024;
+      var name = this.name;
+      //disable file backup to icloud
+      me.backup = false;
+      if(typeof options.backup !== 'undefined'){
+        me.backup = options.backup;
+      }
+
+      function requestFileSystem(amount) {
+//        console.log('in requestFileSystem');
+        var fs = global.requestFileSystem || global.webkitRequestFileSystem || global.moz_requestFileSystem;
+        var mode = window.PERSISTENT;
+        if(typeof LocalFileSystem !== "undefined" && typeof LocalFileSystem.PERSISTENT !== "undefined"){
+          mode = LocalFileSystem.PERSISTENT;
+        }      
+        fs(mode, amount, function(fs) {
+//          console.log('got FS ', fs);
+          fs.root.getDirectory( name, {create:true}, function( directory ) {
+//            console.log('got DIR ', directory);
+            filesystems[name] = directory;
+            if ( callback ) me.fn( me.name, callback ).call( me, me );
+          }, function( e ) {
+//            console.log('error getting dir :: ', e);
+            error(e);
+          });
+        }, function( e ) {
+//          console.log('error getting FS :: ', e);
+          error(e);
+        });
+      };
+
+      // When in the browser we need to use the html5 file system rather than
+      // the one cordova supplies, but it needs to request a quota first.
+      if (typeof navigator.webkitPersistentStorage !== 'undefined') {
+        navigator.webkitPersistentStorage.requestQuota(size, requestFileSystem, function() {
+          logger.warn('User declined file storage');
+          error('User declined file storage');
+        });
+      } else {
+        // Amount is 0 because we pretty much have free reign over the
+        // amount of storage we use on an android device.
+        requestFileSystem(0);
+      }
+    },
+
+    // returns all the keys in the store
+    keys: function( callback ) {
+      var me = this;
+      root( this, function( store ) {
+        ls( store.createReader(), function( entries ) {
+          if ( callback ) me.fn( 'keys', callback ).call( me, entries );
+        });
+      });
+      return this;
+    },
+
+    // save an object
+    save: function( obj, callback ) {
+      var me = this;
+      var key = obj.key || this.uuid();
+      obj.key = key;
+      var error = function(e) { fail(e); if ( callback ) me.lambda( callback ).call( me ); };
+      root( this, function( store ) {
+        var writeContent = function(file, error){
+          file.createWriter(function( writer ) {
+            writer.onerror = error;
+            writer.onwriteend = function() {
+              // Clear the onWriteEnd handler so the truncate does not call it and cause an infinite loop
+              this.onwriteend = null;
+              // Truncate the file at the end of the written contents. This ensures that if we are updating 
+              // a file which was previously longer, we will not be left with old contents beyond the end of 
+              // the current buffer.
+              this.truncate(this.position);
+              if ( callback ) me.lambda( callback ).call( me, obj );
+            };
+            var contentStr = JSON.stringify(obj);
+
+            var writerContent = createBlobOrString(contentStr);
+            writer.write(writerContent);
+          }, error );
+        }
+        store.getFile( key, {create:true}, function( file ) {
+          if(typeof file.setMetadata === 'function' && (me.backup === false || me.backup === 'false')){
+            //set meta data on the file to make sure it won't be backed up by icloud
+            file.setMetadata(function(){
+              writeContent(file, error);
+            }, function(){
+              writeContent(file, error);
+            }, {'com.apple.MobileBackup': 1});
+          } else {
+            writeContent(file, error);
+          }
+        }, error );
+      });
+      return this;
+    },
+
+    // batch save array of objs
+    batch: function( objs, callback ) {
+      var me = this;
+      var saved = [];
+      for ( var i = 0, il = objs.length; i < il; i++ ) {
+        me.save( objs[i], function( obj ) {
+          saved.push( obj );
+          if ( saved.length === il && callback ) {
+            me.lambda( callback ).call( me, saved );
+          }
+        });
+      }
+      return this;
+    },
+
+    // retrieve obj (or array of objs) and apply callback to each
+    get: function( key /* or array */, callback ) {
+      var me = this;
+      if ( this.isArray( key ) ) {
+        var values = [];
+        for ( var i = 0, il = key.length; i < il; i++ ) {
+          me.get( key[i], function( result ) {
+            if ( result ) values.push( result );
+            if ( values.length === il && callback ) {
+              me.lambda( callback ).call( me, values );
+            }
+          });
+        }
+      } else {
+        var error = function(e) {
+          fail( e );
+          if ( callback ) {
+            me.lambda( callback ).call( me );
+          }
+        };
+        root( this, function( store ) {
+          store.getFile( key, {create:false}, function( entry ) {
+            entry.file(function( file ) {
+              var reader = new FileReader();
+
+              reader.onerror = error;
+
+              reader.onload = function(e) {
+                var res = {};
+                try {
+                  res = JSON.parse( e.target.result);
+                  res.key = key;
+                } catch (e) {
+                  res = {key:key};
+                }
+                if ( callback ) me.lambda( callback ).call( me, res );
+              };
+
+              reader.readAsText( file );
+            }, error );
+          }, error );
+        });
+      }
+      return this;
+    },
+
+    // check if an obj exists in the collection
+    exists: function( key, callback ) {
+      var me = this;
+      root( this, function( store ) {
+        store.getFile( key, {create:false}, function() {
+          if ( callback ) me.lambda( callback ).call( me, true );
+        }, function() {
+          if ( callback ) me.lambda( callback ).call( me, false );
+        });
+      });
+      return this;
+    },
+
+    // returns all the objs to the callback as an array
+    all: function( callback ) {
+      var me = this;
+      if ( callback ) {
+        this.keys(function( keys ) {
+          if ( !keys.length ) {
+            me.fn( me.name, callback ).call( me, [] );
+          } else {
+            me.get( keys, function( values ) {
+              me.fn( me.name, callback ).call( me, values );
+            });
+          }
+        });
+      }
+      return this;
+    },
+
+    // remove a doc or collection of em
+    remove: function( key /* or object */, callback ) {
+      var me = this;
+      var error = function(e) { fail( e ); if ( callback ) me.lambda( callback ).call( me ); };
+      root( this, function( store ) {
+        store.getFile( (typeof key === 'string' ? key : key.key ), {create:false}, function( file ) {
+          file.remove(function() {
+            if ( callback ) me.lambda( callback ).call( me );
+          }, error );
+        }, error );
+      });
+      return this;
+    },
+
+    // destroy everything
+    nuke: function( callback ) {
+      var me = this;
+      var count = 0;
+      this.keys(function( keys ) {
+        if ( !keys.length ) {
+          if ( callback ) me.lambda( callback ).call( me );
+        } else {
+          for ( var i = 0, il = keys.length; i < il; i++ ) {
+            me.remove( keys[i], function() {
+              count++;
+              if ( count === il && callback ) {
+                me.lambda( callback ).call( me );
+              }
+            });
+          }
+        }
+      });
+      return this;
+    }
+  };
+}(this)));
+Lawnchair.adapter('memory', (function(){
+
+    var data = {}
+
+    return {
+        valid: function() { return true },
+
+        init: function (options, callback) {
+            data[this.name] = data[this.name] || {index:[],store:{}}
+            this.index = data[this.name].index
+            this.store = data[this.name].store
+            var cb = this.fn(this.name, callback)
+            if (cb) cb.call(this, this)
+            return this
+        },
+
+        keys: function (callback) {
+            this.fn('keys', callback).call(this, this.index)
+            return this
+        },
+
+        save: function(obj, cb) {
+            var key = obj.key || this.uuid()
+            
+            this.exists(key, function(exists) {
+                if (!exists) {
+                    if (obj.key) delete obj.key
+                    this.index.push(key)
+                }
+
+                this.store[key] = obj
+                
+                if (cb) {
+                    obj.key = key
+                    this.lambda(cb).call(this, obj)
+                }
+            })
+
+            return this
+        },
+
+        batch: function (objs, cb) {
+            var r = []
+            for (var i = 0, l = objs.length; i < l; i++) {
+                this.save(objs[i], function(record) {
+                    r.push(record)
+                })
+            }
+            if (cb) this.lambda(cb).call(this, r)
+            return this
+        },
+
+        get: function (keyOrArray, cb) {
+            var r;
+            if (this.isArray(keyOrArray)) {
+                r = []
+                for (var i = 0, l = keyOrArray.length; i < l; i++) {
+                    r.push(this.store[keyOrArray[i]])
+                }
+            } else {
+                r = this.store[keyOrArray]
+                if (r) r.key = keyOrArray
+            }
+            if (cb) this.lambda(cb).call(this, r)
+            return this 
+        },
+
+        exists: function (key, cb) {
+            this.lambda(cb).call(this, !!(this.store[key]))
+            return this
+        },
+
+        all: function (cb) {
+            var r = []
+            for (var i = 0, l = this.index.length; i < l; i++) {
+                var obj = this.store[this.index[i]]
+                obj.key = this.index[i]
+                r.push(obj)
+            }
+            this.fn(this.name, cb).call(this, r)
+            return this
+        },
+
+        remove: function (keyOrArray, cb) {
+            var del = this.isArray(keyOrArray) ? keyOrArray : [keyOrArray]
+            for (var i = 0, l = del.length; i < l; i++) {
+                var key = del[i].key ? del[i].key : del[i]
+                var where = this.indexOf(this.index, key)
+                if (where < 0) continue /* key not present */
+                delete this.store[key]
+                this.index.splice(where, 1)
+            }
+            if (cb) this.lambda(cb).call(this)
+            return this
+        },
+
+        nuke: function (cb) {
+            this.store = data[this.name].store = {}
+            this.index = data[this.name].index = []
+            if (cb) this.lambda(cb).call(this)
+            return this
+        }
+    }
+/////
 })());
 ; browserify_shim__define__module__export__(typeof Lawnchair != "undefined" ? Lawnchair : window.Lawnchair);
 
@@ -6368,8 +6794,8 @@ function hasOwnProperty(obj, prop) {
   return Object.prototype.hasOwnProperty.call(obj, prop);
 }
 
-}).call(this,_dereq_("/Users/weili/work/fh-sdks/fh-js-sdk/node_modules/grunt-browserify/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js"),typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./support/isBuffer":6,"/Users/weili/work/fh-sdks/fh-js-sdk/node_modules/grunt-browserify/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js":11,"inherits":10}],8:[function(_dereq_,module,exports){
+}).call(this,_dereq_("/Users/ndonnelly/program_source_for_dev/fh-js-sdk/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js"),typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{"./support/isBuffer":6,"/Users/ndonnelly/program_source_for_dev/fh-js-sdk/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js":11,"inherits":10}],8:[function(_dereq_,module,exports){
 (function (global){
 /*global window, global*/
 var util = _dereq_("util")
@@ -6606,7 +7032,10 @@ EventEmitter.prototype.addListener = function(type, listener) {
                     'leak detected. %d listeners added. ' +
                     'Use emitter.setMaxListeners() to increase limit.',
                     this._events[type].length);
-      console.trace();
+      if (typeof console.trace === 'function') {
+        // not supported in IE 10
+        console.trace();
+      }
     }
   }
 
@@ -6844,7 +7273,206 @@ process.chdir = function (dir) {
 module.exports=_dereq_(6)
 },{}],13:[function(_dereq_,module,exports){
 module.exports=_dereq_(7)
-},{"./support/isBuffer":12,"/Users/weili/work/fh-sdks/fh-js-sdk/node_modules/grunt-browserify/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js":11,"inherits":10}],14:[function(_dereq_,module,exports){
+},{"./support/isBuffer":12,"/Users/ndonnelly/program_source_for_dev/fh-js-sdk/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js":11,"inherits":10}],14:[function(_dereq_,module,exports){
+/*
+ * loglevel - https://github.com/pimterry/loglevel
+ *
+ * Copyright (c) 2013 Tim Perry
+ * Licensed under the MIT license.
+ */
+
+;(function (undefined) {
+    var undefinedType = "undefined";
+
+    (function (name, definition) {
+        if (typeof module !== 'undefined') {
+            module.exports = definition();
+        } else if (typeof define === 'function' && typeof define.amd === 'object') {
+            define(definition);
+        } else {
+            this[name] = definition();
+        }
+    }('log', function () {
+        var self = {};
+        var noop = function() {};
+
+        function realMethod(methodName) {
+            if (typeof console === undefinedType) {
+                return noop;
+            } else if (console[methodName] === undefined) {
+                if (console.log !== undefined) {
+                    return boundToConsole(console, 'log');
+                } else {
+                    return noop;
+                }
+            } else {
+                return boundToConsole(console, methodName);
+            }
+        }
+
+        function boundToConsole(console, methodName) {
+            var method = console[methodName];
+            if (method.bind === undefined) {
+                if (Function.prototype.bind === undefined) {
+                    return functionBindingWrapper(method, console);
+                } else {
+                    try {
+                        return Function.prototype.bind.call(console[methodName], console);
+                    } catch (e) {
+                        // In IE8 + Modernizr, the bind shim will reject the above, so we fall back to wrapping
+                        return functionBindingWrapper(method, console);
+                    }
+                }
+            } else {
+                return console[methodName].bind(console);
+            }
+        }
+
+        function functionBindingWrapper(f, context) {
+            return function() {
+                Function.prototype.apply.apply(f, [context, arguments]);
+            };
+        }
+
+        var logMethods = [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+        ];
+
+        function replaceLoggingMethods(methodFactory) {
+            for (var ii = 0; ii < logMethods.length; ii++) {
+                self[logMethods[ii]] = methodFactory(logMethods[ii]);
+            }
+        }
+
+        function cookiesAvailable() {
+            return (typeof window !== undefinedType &&
+                    window.document !== undefined &&
+                    window.document.cookie !== undefined);
+        }
+
+        function localStorageAvailable() {
+            try {
+                return (typeof window !== undefinedType &&
+                        window.localStorage !== undefined);
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function persistLevelIfPossible(levelNum) {
+            var localStorageFail = false,
+                levelName;
+
+            for (var key in self.levels) {
+                if (self.levels.hasOwnProperty(key) && self.levels[key] === levelNum) {
+                    levelName = key;
+                    break;
+                }
+            }
+
+            if (localStorageAvailable()) {
+                /*
+                 * Setting localStorage can create a DOM 22 Exception if running in Private mode
+                 * in Safari, so even if it is available we need to catch any errors when trying
+                 * to write to it
+                 */
+                try {
+                    window.localStorage['loglevel'] = levelName;
+                } catch (e) {
+                    localStorageFail = true;
+                }
+            } else {
+                localStorageFail = true;
+            }
+
+            if (localStorageFail && cookiesAvailable()) {
+                window.document.cookie = "loglevel=" + levelName + ";";
+            }
+        }
+
+        var cookieRegex = /loglevel=([^;]+)/;
+
+        function loadPersistedLevel() {
+            var storedLevel;
+
+            if (localStorageAvailable()) {
+                storedLevel = window.localStorage['loglevel'];
+            }
+
+            if (storedLevel === undefined && cookiesAvailable()) {
+                var cookieMatch = cookieRegex.exec(window.document.cookie) || [];
+                storedLevel = cookieMatch[1];
+            }
+            
+            if (self.levels[storedLevel] === undefined) {
+                storedLevel = "WARN";
+            }
+
+            self.setLevel(self.levels[storedLevel]);
+        }
+
+        /*
+         *
+         * Public API
+         *
+         */
+
+        self.levels = { "TRACE": 0, "DEBUG": 1, "INFO": 2, "WARN": 3,
+            "ERROR": 4, "SILENT": 5};
+
+        self.setLevel = function (level) {
+            if (typeof level === "number" && level >= 0 && level <= self.levels.SILENT) {
+                persistLevelIfPossible(level);
+
+                if (level === self.levels.SILENT) {
+                    replaceLoggingMethods(function () {
+                        return noop;
+                    });
+                    return;
+                } else if (typeof console === undefinedType) {
+                    replaceLoggingMethods(function (methodName) {
+                        return function () {
+                            if (typeof console !== undefinedType) {
+                                self.setLevel(level);
+                                self[methodName].apply(self, arguments);
+                            }
+                        };
+                    });
+                    return "No console available for logging";
+                } else {
+                    replaceLoggingMethods(function (methodName) {
+                        if (level <= self.levels[methodName.toUpperCase()]) {
+                            return realMethod(methodName);
+                        } else {
+                            return noop;
+                        }
+                    });
+                }
+            } else if (typeof level === "string" && self.levels[level.toUpperCase()] !== undefined) {
+                self.setLevel(self.levels[level.toUpperCase()]);
+            } else {
+                throw "log.setLevel() called with invalid level: " + level;
+            }
+        };
+
+        self.enableAll = function() {
+            self.setLevel(self.levels.TRACE);
+        };
+
+        self.disableAll = function() {
+            self.setLevel(self.levels.SILENT);
+        };
+
+        loadPersistedLevel();
+        return self;
+    }));
+})();
+
+},{}],15:[function(_dereq_,module,exports){
 var toString = Object.prototype.toString
 
 module.exports = function(val){
@@ -6875,9 +7503,10 @@ module.exports = function(val){
   return typeof val
 }
 
-},{}],15:[function(_dereq_,module,exports){
+},{}],16:[function(_dereq_,module,exports){
 var constants = _dereq_("./modules/constants");
-var console = _dereq_("console");
+var events = _dereq_("./modules/events");
+var logger = _dereq_("./modules/logger");
 var ajax = _dereq_("./modules/ajax");
 var events = _dereq_("./modules/events");
 var cloud = _dereq_("./modules/waitForCloud");
@@ -6887,72 +7516,50 @@ var api_sec = _dereq_("./modules/api_sec");
 var api_hash = _dereq_("./modules/api_hash");
 var api_sync = _dereq_("./modules/sync-cli");
 var api_mbaas = _dereq_("./modules/api_mbaas");
+var api_cloud = _dereq_("./modules/api_cloud");
 var fhparams = _dereq_("./modules/fhparams");
 var appProps = _dereq_("./modules/appProps");
+var device = _dereq_("./modules/device");
 
 var defaultFail = function(msg, error){
-  console.log(msg + ":" + JSON.stringify(error));
+  logger.error(msg + ":" + JSON.stringify(error));
 };
 
 var addListener = function(type, listener){
-  if(type === "cloudready"){
-    cloud.ready(function(err, host){
-      if(!err){
-        listener(host);
-      }
-    });
-  } else {
-    events.addListener(type, listener);
+  events.addListener(type, listener);
+  if(type === constants.INIT_EVENT){
+    //for fhinit event, need to check the status of cloud and may need to fire the listener immediately.
+    if(cloud.isReady()){
+      listener(null, {host: cloud.getCloudHostUrl()});
+    } else if(cloud.getInitError()){
+      listener(cloud.getInitError());
+    }
   }
 };
 
 var once = function(type, listener){
-  if(type === "cloudready"){
-    cloud.ready(function(err, host){
-      if(!err){
-        listener(host);
-      }
-    });
+  if(type === constants.INIT_EVENT && cloud.isReady()){
+    listener(null, {host: cloud.getCloudHostUrl()});
+  } else if(type === constants.INIT_EVENT && cloud.getInitError()){
+    listener(cloud.getInitError());
   } else {
     events.once(type, listener);
   }
 };
 
-//we have to continue support for init for now as for FH v2 apps, there won't be a config file created
+//Legacy shim. Init hapens based on fhconfig.json or, for v2, global var called fh_app_props which is injected as part of the index.html wrapper
 var init = function(opts, success, fail){
-  console.warn("$fh.init will be deprecated soon");
+  logger.warn("$fh.init will be deprecated soon");
   cloud.ready(function(err, host){
     if(err){
-      if(err.message === "app_config_missing"){
-        //cloud.ready will be invoked when js sdk is loaded, it may cause init call to be added to the "cloudready" event listeners stack when it's called. If that is the case and getting an error
-        //about app config is missing, we just try again
-        init(opts, success, fail);
-      } else {
-        if(typeof fail === "function"){
-          return fail(err);
-        }
+      if(typeof fail === "function"){
+        return fail(err);
       }
     } else {
       if(typeof success === "function"){
         success(host.host);
       }
     }
-  }, opts);
-};
-
-var cloudFunc = function(act_name, params, cb){
-  var funcName = act_name;
-  var data = params;
-  var callback = cb;
-  if(typeof params === "function"){
-    data = {};
-    callback = params;
-  }
-  var reqParams = {act: funcName, req: data};
-  api_act(reqParams, function(res){
-    return callback(null, res);
-  }, function(msg, error){
-    return callback(error);
   });
 };
 
@@ -6960,12 +7567,14 @@ var fh = window.$fh || {};
 fh.init = init;
 fh.act = api_act;
 fh.auth = api_auth;
-fh.cloud = cloudFunc;
+fh.cloud = api_cloud;
 fh.sec = api_sec;
 fh.hash = api_hash;
 fh.sync = api_sync;
 fh.ajax = fh.__ajax = ajax;
 fh.mbaas = api_mbaas;
+fh._getDeviceId = device.getDeviceId;
+fh.fh_timeout = 60000; //keep backward compatible
 
 fh.getCloudURL = function(){
   return cloud.getCloudHostUrl();
@@ -6985,9 +7594,27 @@ for(var i=0;i<methods.length;i++){
 }
 
 //keep backward compatibility
-fh.on("cloudready", function(host){
-  fh.cloud_props = {hosts: {url: host.host}};
-  fh.app_props = appProps.getAppProps();
+fh.on(constants.INIT_EVENT, function(err, host){
+  if(err){
+    fh.cloud_props = {};
+    fh.app_props = {};
+  } else {
+    fh.cloud_props = {hosts: {url: host.host}};
+    fh.app_props = appProps.getAppProps();
+  }
+});
+
+//keep backward compatibility
+fh.on(constants.INTERNAL_CONFIG_LOADED_EVENT, function(err, host){
+  if(err){
+    fh.app_props = {};
+  } else {
+    fh.app_props = appProps.getAppProps();
+  }
+
+  // Emit config loaded event - appprops set at this point
+  // V2 legacy SDK uses this to know when to fire $fh.ready (i.e. appprops is now set)
+  events.emit(constants.CONFIG_LOADED_EVENT, null);
 });
 
 //for test
@@ -7002,7 +7629,7 @@ module.exports = fh;
 
 
 
-},{"./modules/ajax":17,"./modules/api_act":18,"./modules/api_auth":19,"./modules/api_hash":20,"./modules/api_mbaas":21,"./modules/api_sec":22,"./modules/appProps":23,"./modules/constants":25,"./modules/events":28,"./modules/fhparams":29,"./modules/sync-cli":43,"./modules/waitForCloud":45,"console":8}],16:[function(_dereq_,module,exports){
+},{"./modules/ajax":18,"./modules/api_act":19,"./modules/api_auth":20,"./modules/api_cloud":21,"./modules/api_hash":22,"./modules/api_mbaas":23,"./modules/api_sec":24,"./modules/appProps":25,"./modules/constants":27,"./modules/device":29,"./modules/events":30,"./modules/fhparams":31,"./modules/logger":37,"./modules/sync-cli":45,"./modules/waitForCloud":47}],17:[function(_dereq_,module,exports){
 var XDomainRequestWrapper = function(xdr){
   this.xdr = xdr;
   this.isWrapper = true;
@@ -7067,7 +7694,7 @@ XDomainRequestWrapper.prototype.getResponseHeader = function(n){
 
 module.exports = XDomainRequestWrapper;
 
-},{}],17:[function(_dereq_,module,exports){
+},{}],18:[function(_dereq_,module,exports){
 //a shameless copy from https://github.com/ForbesLindesay/ajax/blob/master/index.js.
 //it has the same methods and config options as jQuery/zeptojs but very light weight. see http://api.jquery.com/jQuery.ajax/
 //a few small changes are made for supporting IE 8 and other features:
@@ -7080,7 +7707,7 @@ module.exports = XDomainRequestWrapper;
 
 var eventsHandler = _dereq_("./events");
 var XDomainRequestWrapper = _dereq_("./XDomainRequestWrapper");
-var consts = _dereq_("./constants");
+var logger = _dereq_("./logger");
 
 var type
 try {
@@ -7100,17 +7727,23 @@ var jsonpID = 0,
   xmlTypeRE = /^(?:text|application)\/xml/i,
   jsonType = 'application/json',
   htmlType = 'text/html',
-  blankRE = /^\s*$/
+  blankRE = /^\s*$/;
 
 var ajax = module.exports = function (options) {
   var settings = extend({}, options || {})
+  //keep backward compatibility
+  if(window && window.$fh && typeof window.$fh.fh_timeout === "number"){
+    ajax.settings.timeout = window.$fh.fh_timeout;
+  }
+
   for (key in ajax.settings)
     if (settings[key] === undefined) settings[key] = ajax.settings[key]
 
   ajaxStart(settings)
 
-  if (!settings.crossDomain) settings.crossDomain = /^([\w-]+:)?\/\/([^\/]+)/.test(settings.url) &&
-    RegExp.$2 != window.location.host
+  if (!settings.crossDomain) {
+    settings.crossDomain = /^([\w-]+:)?\/\/([^\/]+)/.test(settings.url) && (RegExp.$1 != window.location.protocol || RegExp.$2 != window.location.host)
+  } 
 
   var dataType = settings.dataType,
     hasPlaceholder = /=\?/.test(settings.url)
@@ -7128,7 +7761,7 @@ var ajax = module.exports = function (options) {
     baseHeaders = {},
     protocol = /^([\w-]+:)\/\//.test(settings.url) ? RegExp.$1 : window.location.protocol,
     xhr = settings.xhr(settings.crossDomain),
-    abortTimeout
+    abortTimeout = null;
 
   if (!settings.crossDomain) baseHeaders['X-Requested-With'] = 'XMLHttpRequest'
   if (mime) {
@@ -7136,17 +7769,30 @@ var ajax = module.exports = function (options) {
     if (mime.indexOf(',') > -1) mime = mime.split(',', 2)[0]
     xhr.overrideMimeType && xhr.overrideMimeType(mime)
   }
-  if (settings.contentType || (settings.data && settings.type.toUpperCase() != 'GET'))
+  if (settings.contentType || (settings.data && !settings.formdata && settings.type.toUpperCase() != 'GET'))
     baseHeaders['Content-Type'] = (settings.contentType || 'application/x-www-form-urlencoded')
   settings.headers = extend(baseHeaders, settings.headers || {})
 
+  if (typeof Titanium !== 'undefined') {
+    xhr.onerror  = function(){
+      if (!abortTimeout){
+        return;
+      }
+      clearTimeout(abortTimeout);
+      ajaxError(null, 'error', xhr, settings);
+    };
+  }
+
   xhr.onreadystatechange = function () {
+
     if (xhr.readyState == 4) {
       clearTimeout(abortTimeout)
+      abortTimeout = undefined;
       var result, error = false
       if(settings.tryJSONP){
         //check if the request has fail. In some cases, we may want to try jsonp as well. Again, FH only...
         if(xhr.status === 0 && settings.crossDomain && !xhr.isTimeout &&  protocol != 'file:'){
+          logger.debug("retry ajax call with jsonp")
           settings.type = "GET";
           settings.dataType = "jsonp";
           settings.data = "_jsonpdata=" + settings.data;
@@ -7156,6 +7802,7 @@ var ajax = module.exports = function (options) {
       if ((xhr.status >= 200 && xhr.status < 300) || xhr.status == 304 || (xhr.status == 0 && protocol == 'file:')) {
         dataType = dataType || mimeToDataType(xhr.getResponseHeader('content-type'))
         result = xhr.responseText
+        logger.debug("ajax response :: status = " + xhr.status + " :: body = " + result)
 
         try {
           if (dataType == 'script')(1, eval)(result)
@@ -7165,7 +7812,10 @@ var ajax = module.exports = function (options) {
           error = e
         }
 
-        if (error) ajaxError(error, 'parsererror', xhr, settings)
+        if (error) {
+          logger.debug("ajax error", error);
+          ajaxError(error, 'parsererror', xhr, settings)
+        }
         else ajaxSuccess(result, xhr, settings)
       } else {
         ajaxError(null, 'error', xhr, settings)
@@ -7174,16 +7824,19 @@ var ajax = module.exports = function (options) {
   }
 
   var async = 'async' in settings ? settings.async : true
+  logger.debug("ajax call settings", settings)
   xhr.open(settings.type, settings.url, async)
 
   for (name in settings.headers) xhr.setRequestHeader(name, settings.headers[name])
 
   if (ajaxBeforeSend(xhr, settings) === false) {
+    logger.debug("ajax call is aborted due to ajaxBeforeSend")
     xhr.abort()
     return false
   }
 
   if (settings.timeout > 0) abortTimeout = setTimeout(function () {
+    logger.debug("ajax call timed out")
     xhr.onreadystatechange = empty
     xhr.abort()
     xhr.isTimeout = true
@@ -7275,13 +7928,12 @@ ajax.JSONP = function (options) {
 
   window[callbackName] = function (data) {
     clearTimeout(abortTimeout)
+    abortTimeout = undefined;
     //todo: remove script
     //$(script).remove()
     delete window[callbackName]
     ajaxSuccess(data, xhr, options)
   }
-  console.log("trying jsonp.data");
-  console.log(options);
 
   serializeData(options)
   script.src = options.url.replace(/=\?/, '=' + callbackName)
@@ -7312,10 +7964,19 @@ function getXhr(crossDomain){
   if(window.XMLHttpRequest){
     xhr = new XMLHttpRequest();
   }
-  //for IE8
-  if(isIE() && (crossDomain === true) && typeof window.XDomainRequest !== "undefined"){
+  //for IE8 only. Need to make sure it's not used when running inside Cordova.
+  if(isIE() && (crossDomain === true) && typeof window.XDomainRequest !== "undefined" && typeof window.cordova === "undefined"){
     xhr = new XDomainRequestWrapper(new XDomainRequest());
   }
+  // For Titanium SDK
+  if (typeof Titanium !== 'undefined'){
+    var parms = {};
+    if(ajax.settings && ajax.settings.timeout){
+      params.timeout = ajax.settings.timeout;
+    }
+    xhr = Titanium.Network.createHTTPClient(params);
+  }
+
   return xhr;
 }
 
@@ -7345,9 +8006,7 @@ ajax.settings = {
     text: 'text/plain'
   },
   // Whether the request is to another domain
-  crossDomain: false,
-  // Default timeout
-  timeout: consts.fh_timeout
+  crossDomain: false
 }
 
 function mimeToDataType(mime) {
@@ -7363,7 +8022,14 @@ function appendQuery(url, query) {
 
 // serialize payload and append it to the URL for GET requests
 function serializeData(options) {
-  if (type(options.data) === 'object') options.data = param(options.data)
+  if (type(options.data) === 'object') {
+    if(typeof options.data.append === "function"){
+      //we are dealing with FormData, do not serialize
+      options.formdata = true;
+    } else {
+      options.data = param(options.data)
+    }
+  }
   if (options.data && (!options.type || options.type.toUpperCase() == 'GET'))
     options.url = appendQuery(options.url, options.data)
 }
@@ -7429,13 +8095,15 @@ function extend(target) {
   })
   return target
 }
-},{"./XDomainRequestWrapper":16,"./constants":25,"./events":28,"type-of":14}],18:[function(_dereq_,module,exports){
-var console =_dereq_("console");
+
+},{"./XDomainRequestWrapper":17,"./events":30,"./logger":37,"type-of":15}],19:[function(_dereq_,module,exports){
+var logger =_dereq_("./logger");
 var cloud = _dereq_("./waitForCloud");
 var fhparams = _dereq_("./fhparams");
 var ajax = _dereq_("./ajax");
 var JSON = _dereq_("JSON");
 var handleError = _dereq_("./handleError");
+var appProps = _dereq_("./appProps");
 
 function doActCall(opts, success, fail){
   var cloud_host = cloud.getCloudHost();
@@ -7449,19 +8117,19 @@ function doActCall(opts, success, fail){
     "dataType": "json",
     "data": JSON.stringify(params),
     "contentType": "application/json",
-    "timeout": opts.timeout,
+    "timeout": opts.timeout || appProps.timeout,
     "success": success,
     "error": function(req, statusText, error){
-      return handleError(fail, req, statusText);
+      return handleError(fail, req, statusText, error);
     }
   })
 }
 
 module.exports = function(opts, success, fail){
-  console.log("act is called");
+  logger.debug("act is called");
   if(!fail){
     fail = function(msg, error){
-      console.log(msg + ":" + JSON.stringify(error));
+      logger.debug(msg + ":" + JSON.stringify(error));
     };
   }
 
@@ -7470,7 +8138,7 @@ module.exports = function(opts, success, fail){
   }
 
   cloud.ready(function(err, cloudHost){
-    console.log("Calling fhact now");
+    logger.debug("Calling fhact now");
     if(err){
       return fail(err.message, err);
     } else {
@@ -7478,8 +8146,9 @@ module.exports = function(opts, success, fail){
     }
   })
 }
-},{"./ajax":17,"./fhparams":29,"./handleError":31,"./waitForCloud":45,"JSON":3,"console":8}],19:[function(_dereq_,module,exports){
-var console =_dereq_("console");
+
+},{"./ajax":18,"./appProps":25,"./fhparams":31,"./handleError":32,"./logger":37,"./waitForCloud":47,"JSON":3}],20:[function(_dereq_,module,exports){
+var logger = _dereq_("./logger");
 var cloud = _dereq_("./waitForCloud");
 var fhparams = _dereq_("./fhparams");
 var ajax = _dereq_("./ajax");
@@ -7490,10 +8159,10 @@ var constants = _dereq_("./constants");
 var checkAuth = _dereq_("./checkAuth");
 var appProps = _dereq_("./appProps");
 
-module.exports = function(opts, success, fail){
-  if(!fail){
-    fail = function(msg, error){
-      console.log(msg + ":" + JSON.stringify(error));
+module.exports = function(opts, success, fail) {
+  if (!fail) {
+    fail = function(msg, error) {
+      logger.debug(msg + ":" + JSON.stringify(error));
     };
   }
   if (!opts.policyId) {
@@ -7503,8 +8172,8 @@ module.exports = function(opts, success, fail){
     return fail('auth_no_clientToken', {});
   }
 
-  cloud.ready(function(err, data){
-    if(err){
+  cloud.ready(function(err, data) {
+    if (err) {
       return fail(err.message, err);
     } else {
       var req = {};
@@ -7524,6 +8193,11 @@ module.exports = function(opts, success, fail){
       req.device = device.getDeviceId();
       var app_props = appProps.getAppProps();
       var path = app_props.host + constants.boxprefix + "admin/authpolicy/auth";
+
+      if (app_props.local) {
+        path = constants.boxprefix + "admin/authpolicy/auth";
+      }
+
       req = fhparams.addFHParams(req);
 
       ajax({
@@ -7533,18 +8207,63 @@ module.exports = function(opts, success, fail){
         "data": JSON.stringify(req),
         "dataType": "json",
         "contentType": "application/json",
-        "timeout" : opts.timeout || app_props.timeout || constants.fh_timeout,
+        "timeout": opts.timeout || app_props.timeout,
         success: function(res) {
           checkAuth.handleAuthResponse(endurl, res, success, fail);
         },
         error: function(req, statusText, error) {
-          handleError(fail, req, statusText);
+          handleError(fail, req, statusText, error);
         }
       });
     }
   });
 }
-},{"./ajax":17,"./appProps":23,"./checkAuth":24,"./constants":25,"./device":27,"./fhparams":29,"./handleError":31,"./waitForCloud":45,"JSON":3,"console":8}],20:[function(_dereq_,module,exports){
+},{"./ajax":18,"./appProps":25,"./checkAuth":26,"./constants":27,"./device":29,"./fhparams":31,"./handleError":32,"./logger":37,"./waitForCloud":47,"JSON":3}],21:[function(_dereq_,module,exports){
+var logger =_dereq_("./logger");
+var cloud = _dereq_("./waitForCloud");
+var fhparams = _dereq_("./fhparams");
+var ajax = _dereq_("./ajax");
+var JSON = _dereq_("JSON");
+var handleError = _dereq_("./handleError");
+var appProps = _dereq_("./appProps");
+
+function doCloudCall(opts, success, fail){
+  var cloud_host = cloud.getCloudHost();
+  var url = cloud_host.getCloudUrl(opts.path);
+  var params = opts.data || {};
+  params = fhparams.addFHParams(params);
+  return ajax({
+    "url": url,
+    "type": opts.method || "POST",
+    "dataType": opts.dataType || "json",
+    "data": JSON.stringify(params),
+    "contentType": opts.contentType || "application/json",
+    "timeout": opts.timeout || appProps.timeout,
+    "success": success,
+    "error": function(req, statusText, error){
+      return handleError(fail, req, statusText, error);
+    }
+  })
+}
+
+module.exports = function(opts, success, fail){
+  logger.debug("cloud is called");
+  if(!fail){
+    fail = function(msg, error){
+      logger.debug(msg + ":" + JSON.stringify(error));
+    };
+  }
+
+  cloud.ready(function(err, cloudHost){
+    logger.debug("Calling fhact now");
+    if(err){
+      return fail(err.message, err);
+    } else {
+      doCloudCall(opts, success, fail);
+    }
+  })
+}
+},{"./ajax":18,"./appProps":25,"./fhparams":31,"./handleError":32,"./logger":37,"./waitForCloud":47,"JSON":3}],22:[function(_dereq_,module,exports){
 var hashImpl = _dereq_("./security/hash");
 
 module.exports = function(p, s, f){
@@ -7556,21 +8275,21 @@ module.exports = function(p, s, f){
   params.params = p;
   hashImpl(params, s, f);
 };
-},{"./security/hash":41}],21:[function(_dereq_,module,exports){
-var console =_dereq_("console");
+},{"./security/hash":43}],23:[function(_dereq_,module,exports){
+var logger =_dereq_("./logger");
 var cloud = _dereq_("./waitForCloud");
 var fhparams = _dereq_("./fhparams");
 var ajax = _dereq_("./ajax");
 var JSON = _dereq_("JSON");
 var handleError = _dereq_("./handleError");
 var consts = _dereq_("./constants");
-
+var appProps = _dereq_("./appProps");
 
 module.exports = function(opts, success, fail){
-  console.log("mbaas is called.");
+  logger.debug("mbaas is called.");
   if(!fail){
     fail = function(msg, error){
-      console.log(msg + ":" + JSON.stringify(error));
+      console.debug(msg + ":" + JSON.stringify(error));
     };
   }
 
@@ -7578,7 +8297,7 @@ module.exports = function(opts, success, fail){
   var params = opts.params;
 
   cloud.ready(function(err, cloudHost){
-    console.log("Calling mbaas now");
+    logger.debug("Calling mbaas now");
     if(err){
       return fail(err.message, err);
     } else {
@@ -7592,14 +8311,17 @@ module.exports = function(opts, success, fail){
         "dataType": "json",
         "data": JSON.stringify(params),
         "contentType": "application/json",
-        "timeout": opts.timeout || consts.fh_timeout,
+        "timeout": opts.timeout || appProps.timeout,
         "success": success,
-        "error": fail
+        "error": function(req, statusText, error){
+          return handleError(fail, req, statusText, error);
+        }
       });
     }
   });
-}
-},{"./ajax":17,"./constants":25,"./fhparams":29,"./handleError":31,"./waitForCloud":45,"JSON":3,"console":8}],22:[function(_dereq_,module,exports){
+} 
+
+},{"./ajax":18,"./appProps":25,"./constants":27,"./fhparams":31,"./handleError":32,"./logger":37,"./waitForCloud":47,"JSON":3}],24:[function(_dereq_,module,exports){
 var keygen = _dereq_("./security/aes-keygen");
 var aes = _dereq_("./security/aes-node");
 var rsa = _dereq_("./security/rsa-node");
@@ -7643,44 +8365,80 @@ module.exports = function(p, s, f){
     }
   }
 }
-},{"./security/aes-keygen":39,"./security/aes-node":40,"./security/hash":41,"./security/rsa-node":42}],23:[function(_dereq_,module,exports){
+},{"./security/aes-keygen":41,"./security/aes-node":42,"./security/hash":43,"./security/rsa-node":44}],25:[function(_dereq_,module,exports){
 var consts = _dereq_("./constants");
 var ajax = _dereq_("./ajax");
-var console = _dereq_("console");
+var logger = _dereq_("./logger");
+var qs = _dereq_("./queryMap");
 
 var app_props = null;
 
-var load = function(cb){
-  ajax({url: consts.config_js, dataType:"json", success: function(data){
-    console.log("fhconfig = " + JSON.stringify(data));
-    //when load the config file on device, because file:// protocol is used, it will never call fail call back. The success callback will be called but the data value will be null.
-    if(null == data){
-      return cb(new Error("app_config_missing"));
-    } else {
-      app_props = data;
-      cb(null, app_props);
+var load = function(cb) {
+  var doc_url = document.location.href;
+  var url_params = qs(doc_url);
+  var local = (typeof url_params.url !== 'undefined');
+
+  // For local environments, no init needed
+  if (local) {
+    app_props = {};
+    app_props.local = true;
+    app_props.host = url_params.url.replace(/#.*?$/g, '');
+    app_props.appid = "000000000000000000000000";
+    app_props.appkey = "0000000000000000000000000000000000000000";
+    app_props.projectid = "000000000000000000000000";
+    app_props.connectiontag = "0.0.1";
+    app_props.loglevel = url_params.loglevel;
+    return cb(null, app_props);
+  }
+
+  var config_url = url_params.fhconfig || consts.config_js;
+  ajax({
+    url: config_url,
+    dataType: "json",
+    success: function(data) {
+      logger.debug("fhconfig = " + JSON.stringify(data));
+      //when load the config file on device, because file:// protocol is used, it will never call fail call back. The success callback will be called but the data value will be null.
+      if (null == data) {
+        //fh v2 only
+        if(window.fh_app_props){
+          app_props = window.fh_app_props;
+          return cb(null, window.fh_app_props);
+        }
+        return cb(new Error("app_config_missing"));
+      } else {
+        app_props = data;
+
+        cb(null, app_props);
+      }
+    },
+    error: function(req, statusText, error) {
+      //fh v2 only
+      if(window.fh_app_props){
+        app_props = window.fh_app_props;
+        return cb(null, window.fh_app_props);
+      }
+      logger.error(consts.config_js + " Not Found");
+      cb(new Error("app_config_missing"));
     }
-  }, error: function(req, statusText, error){
-    console.log(consts.config_js  + " Not Found");
-    cb(new Error("app_config_missing"));
-  }});
-}
+  });
+};
 
-var setAppProps = function(props){
+var setAppProps = function(props) {
   app_props = props;
-}
+};
 
-var getAppProps = function(){
+var getAppProps = function() {
   return app_props;
-}
+};
 
 module.exports = {
   load: load,
   getAppProps: getAppProps,
   setAppProps: setAppProps
-}
-},{"./ajax":17,"./constants":25,"console":8}],24:[function(_dereq_,module,exports){
-var console = _dereq_("console");
+};
+
+},{"./ajax":18,"./constants":27,"./logger":37,"./queryMap":39}],26:[function(_dereq_,module,exports){
+var logger = _dereq_("./logger");
 var queryMap = _dereq_("./queryMap");
 var JSON = _dereq_("JSON");
 var fhparams = _dereq_("./fhparams");
@@ -7754,7 +8512,7 @@ var handleAuthResponse = function(endurl, res, success, fail){
               locationChange(ev.url);
             });
           } catch(e){
-            console.log("InAppBrowser plugin is not intalled.");
+            logger.info("InAppBrowser plugin is not intalled.");
             onComplete(res);
           }
         }
@@ -7777,7 +8535,7 @@ if (window.addEventListener) {
   window.addEventListener('load', function(){
     checkAuth(window.location.href);
   }, false); //W3C
-} else {
+} else if (window.attachEvent) {
   window.attachEvent('onload', function(){
     checkAuth(window.location.href);
   }); //IE
@@ -7787,15 +8545,17 @@ module.exports = {
   "handleAuthResponse": handleAuthResponse
 };
 
-},{"./fhparams":29,"./queryMap":37,"JSON":3,"console":8}],25:[function(_dereq_,module,exports){
+},{"./fhparams":31,"./logger":37,"./queryMap":39,"JSON":3}],27:[function(_dereq_,module,exports){
 module.exports = {
-  "fh_timeout": 20000,
   "boxprefix": "/box/srv/1.1/",
-  "sdk_version": "2.0.0-alpha",
-  "config_js":"fhconfig.json"
-}
-},{}],26:[function(_dereq_,module,exports){
-var console = _dereq_("console");
+  "sdk_version": "2.4.3-BUILD-NUMBER",
+  "config_js": "fhconfig.json",
+  "INIT_EVENT": "fhinit",
+  "INTERNAL_CONFIG_LOADED_EVENT": "internalfhconfigloaded",
+  "CONFIG_LOADED_EVENT": "fhconfigloaded"
+};
+
+},{}],28:[function(_dereq_,module,exports){
 module.exports = {
   readCookieValue  : function (cookie_name) {
     var name_str = cookie_name + "=";
@@ -7820,10 +8580,10 @@ module.exports = {
   }
 };
 
-},{"console":8}],27:[function(_dereq_,module,exports){
+},{}],29:[function(_dereq_,module,exports){
 var cookies = _dereq_("./cookies");
 var uuidModule = _dereq_("./uuid");
-var console = _dereq_("console");
+var logger = _dereq_("./logger");
 
 module.exports = {
   //try to get the unique device identifier
@@ -7885,21 +8645,24 @@ module.exports = {
       destination = "web";
     }
 
+    logger.debug("destination = " + destination);
+
     return destination;
   }
 }
 
-},{"./cookies":26,"./platformsMap":36,"./uuid":44,"console":8}],28:[function(_dereq_,module,exports){
+},{"./cookies":28,"./logger":37,"./platformsMap":38,"./uuid":46}],30:[function(_dereq_,module,exports){
 var EventEmitter = _dereq_('events').EventEmitter;
 
 var emitter = new EventEmitter();
 emitter.setMaxListeners(0);
 
 module.exports = emitter;
-},{"events":9}],29:[function(_dereq_,module,exports){
+},{"events":9}],31:[function(_dereq_,module,exports){
 var device = _dereq_("./device");
 var sdkversion = _dereq_("./sdkversion");
 var appProps = _dereq_("./appProps");
+var logger = _dereq_("./logger");
 
 var defaultParams = null;
 var authSessionToken = null;
@@ -7912,7 +8675,7 @@ var buildFHParams = function(){
   fhparams.cuid = device.getDeviceId();
   fhparams.cuidMap = device.getCuidMap();
   fhparams.destination = device.getDestination();
-
+  
   if(window.device || navigator.device){
     fhparams.device = window.device || navigator.device;
   }
@@ -7943,8 +8706,9 @@ var buildFHParams = function(){
       fhparams.init = typeof(app_props.init) === "string" ? JSON.parse(app_props.init) : app_props.init;
     }
   }
-
+  
   defaultParams = fhparams;
+  logger.debug("fhparams = ", defaultParams);
   return fhparams;
 }
 
@@ -7964,34 +8728,15 @@ module.exports = {
   "setAuthSessionToken":setAuthSessionToken
 }
 
-},{"./appProps":23,"./device":27,"./sdkversion":38}],30:[function(_dereq_,module,exports){
-module.exports = function(){
-  var path = null;
-  var scripts = document.getElementsByTagName('script');
-  var term = /(feedhenry.*?\.js)/;
-  for (var n = scripts.length-1; n>-1; n--) {
-      //trim query parameters
-      var src = scripts[n].src.replace(/\?.*$/, '');
-      //find feedhenry*.js file
-      var matches = src.match(term);
-      if(matches && matches.length === 2){
-        var fhjs = matches[1];
-        if (src.indexOf(fhjs) === (src.length - fhjs.length)) {
-          path = src.substring(0, src.length - fhjs.length);
-          break;
-        }
-      }
-  }
-  return path;
-};
-
-},{}],31:[function(_dereq_,module,exports){
+},{"./appProps":25,"./device":29,"./logger":37,"./sdkversion":40}],32:[function(_dereq_,module,exports){
 var JSON = _dereq_("JSON");
 
-module.exports = function(fail, req, resStatus){
+module.exports = function(fail, req, resStatus, error){
   var errraw;
+  var statusCode = 0;
   if(req){
     try{
+      statusCode = req.status;
       var res = JSON.parse(req.responseText);
       errraw = res.error || res.msg;
       if (errraw instanceof Array) {
@@ -8002,17 +8747,33 @@ module.exports = function(fail, req, resStatus){
     }
   }
   if(fail){
-    fail('error_ajaxfail', {
-      status: req.status,
+    fail(errraw, {
+      status: statusCode,
       message: resStatus,
-      error: errraw
+      error: error
     });
   }
 };
 
-},{"JSON":3}],32:[function(_dereq_,module,exports){
+},{"JSON":3}],33:[function(_dereq_,module,exports){
 var constants = _dereq_("./constants");
 var appProps = _dereq_("./appProps");
+
+function removeEndSlash(input){
+  var ret = input;
+  if(ret.charAt(ret.length - 1) === "/"){
+    ret = ret.substring(0, ret.length-1);
+  }
+  return ret;
+}
+
+function removeStartSlash(input){
+  var ret = input;
+  if(ret.length > 1 && ret.charAt(0) === "/"){
+    ret = ret.substring(1, ret.length);
+  }
+  return ret;
+}
 
 function CloudHost(cloud_props){
   this.cloud_props = cloud_props;
@@ -8044,6 +8805,7 @@ CloudHost.prototype.getHost = function(appType){
         url = cloud_host;
       }
     }
+    url = removeEndSlash(url);
     this.cloud_host = url;
     if(app_type === "fh"){
       this.isLegacy = true;
@@ -8072,9 +8834,18 @@ CloudHost.prototype.getMBAASUrl = function(service){
   return this.cloud_host + "/mbaas/" + service;
 }
 
+CloudHost.prototype.getCloudUrl = function(path){
+  var app_props = appProps.getAppProps() || {};
+  if(typeof this.cloud_host === "undefined"){
+    this.getHost(app_props.mode);
+  }
+  return this.cloud_host + "/" + removeStartSlash(path);
+}
+
+
+
 module.exports = CloudHost;
-},{"./appProps":23,"./constants":25}],33:[function(_dereq_,module,exports){
-var findFHPath = _dereq_("./findFHPath");
+},{"./appProps":25,"./constants":27}],34:[function(_dereq_,module,exports){
 var loadScript = _dereq_("./loadScript");
 var Lawnchair = _dereq_('../../libs/generated/lawnchair');
 var lawnchairext = _dereq_('./lawnchair-ext');
@@ -8082,24 +8853,52 @@ var consts = _dereq_("./constants");
 var fhparams = _dereq_("./fhparams");
 var ajax = _dereq_("./ajax");
 var handleError = _dereq_("./handleError");
-var console = _dereq_("console");
+var logger = _dereq_("./logger");
 var JSON = _dereq_("JSON");
 var hashFunc = _dereq_("./security/hash");
 var appProps = _dereq_("./appProps");
+var constants = _dereq_("./constants");
+var events = _dereq_("./events");
 
-var init = function(cb, app_props){
-  if(arguments.length === 2 && typeof app_props === "object" && app_props.mode){
-    appProps.setAppProps(app_props);
-    return loadCloudProps(app_props, cb);
-  } else {
-    appProps.load(function(err, data){
-      if(err) return cb(err);
-      return loadCloudProps(data, cb);
+var init = function(cb) {
+  appProps.load(function(err, data) {
+    if (err) return cb(err);
+
+    // Emit internal config loaded event - SDK will now set appprops
+    events.emit(constants.INTERNAL_CONFIG_LOADED_EVENT, null, data);
+    return loadCloudProps(data, cb);
+  });
+};
+
+var loadCloudProps = function(app_props, callback) {
+  if (app_props.loglevel) {
+    logger.setLevel(app_props.loglevel);
+  }
+  // If local - shortcircuit the init - just return the host
+  if (app_props.local) {
+    var res = {
+      "domain": "local",
+      "firstTime": false,
+      "hosts": {
+        "debugCloudType": "node",
+        "debugCloudUrl": app_props.host,
+        "releaseCloudType": "node",
+        "releaseCloudUrl": app_props.host,
+        "type": "cloud_nodejs",
+        "url": app_props.host
+      },
+      "init": {
+        "trackId": "000000000000000000000000"
+      },
+      "status": "ok"
+    };
+
+    return callback(null, {
+      cloud: res
     });
   }
-}
 
-var loadCloudProps = function(app_props, callback){
+
   //now we have app props, add the fileStorageAdapter
   lawnchairext.addAdapter(app_props, hashFunc);
   //dom adapter doens't work on windows phone, so don't specify the adapter if the dom one failed
@@ -8107,84 +8906,103 @@ var loadCloudProps = function(app_props, callback){
   //as dom, webkit-sqlite, localFileStorage, window-name
   var lcConf = {
     name: "fh_init_storage",
-    adapter: ["dom", "webkit-sqlite", "localFileStorage", "window-name"],
+    adapter: ["dom", "webkit-sqlite", "window-name"],
     fail: function(msg, err) {
       var error_message = 'read/save from/to local storage failed  msg:' + msg + ' err:' + err;
       return fail(error_message, {});
     }
   };
 
-  var storage = null;
-  try {
-    storage = new Lawnchair(lcConf, function() {});
-  } catch(e){
-    //when dom adapter failed, Lawnchair throws an error
-    //shoudn't go in here anymore
-    lcConf.adapter = undefined;
-    storage = new Lawnchair(lcConf, function() {});
+  if (typeof Titanium !== "undefined") {
+    lcConf.adapter = ['titanium'];
   }
 
-  var path = app_props.host + consts.boxprefix + "app/init";
-
-  storage.get('fh_init', function(storage_res) {
-    var savedHost = null;
-    if (storage_res && storage_res.value !== null && storage_res !== "") {
-      storage_res = typeof(storage_res) === "string" ? JSON.parse(storage_res) : storage_res;
-      storage_res.value = typeof(storage_res.value) === "string" ? JSON.parse(storage_res.value): storage_res.value;
-      if(storage_res.value.init){
-        app_props.init = storage_res.value.init;
-      } else {
-        //keep it backward compatible.
-        app_props.init = typeof(storage_res.value) === "string" ? JSON.parse(storage_res.value) : storage_res.value;
-      }
-      if(storage_res.value.hosts){
-        savedHost = storage_res.value;
-      }
-    }
+  var doInit = function(path, appProps, savedHost, storage) {
     var data = fhparams.buildFHParams();
 
-    ajax(
-      {
-        "url": path,
-        "type": "POST",
-        "tryJSONP": true,
-        "dataType": "json",
-        "contentType": "application/json",
-        "data": JSON.stringify(data),
-        "timeout": app_props.timeout || consts.fh_timeout,
-        "success": function(initRes) {
+    ajax({
+      "url": path,
+      "type": "POST",
+      "tryJSONP": true,
+      "dataType": "json",
+      "contentType": "application/json",
+      "data": JSON.stringify(data),
+      "timeout": appProps.timeout,
+      "success": function(initRes) {
+        if (storage) {
           storage.save({
             key: "fh_init",
             value: initRes
-          }, function() {
+          }, function() {});
+        }
+        if (callback) {
+          callback(null, {
+            cloud: initRes
           });
-          if(callback) {
-            callback(null, {cloud: initRes});
+        }
+      },
+      "error": function(req, statusText, error) {
+        var errormsg = "unknown";
+        if (req) {
+          errormsg = req.status + " - " + req.responseText;
+        }
+        logger.error("App init returned error : " + errormsg);
+        //use the cached host if we have a copy
+        if (savedHost) {
+          logger.info("Using cached host: " + JSON.stringify(savedHost));
+          if (callback) {
+            callback(null, {
+              cloud: savedHost
+            });
           }
-        },
-        "error": function(req, statusText, error) {
-          //use the cached host if we have a copy
-          if(savedHost){
-            if(callback){
-              callback(null, {cloud: savedHost});
+        } else {
+          logger.error("No cached host found. Init failed.");
+          handleError(function(msg, err) {
+            if (callback) {
+              callback({
+                error: err,
+                message: msg
+              });
             }
-          } else {
-            handleError(function(msg, err){
-              if(callback){
-                callback({error: err, message: msg});
-            }
-          }, req, statusText);
+          }, req, statusText, error);
         }
       }
     });
-  });
+  };
+
+  var storage = null;
+  var path = app_props.host + consts.boxprefix + "app/init";
+  try {
+    storage = new Lawnchair(lcConf, function() {});
+    storage.get('fh_init', function(storage_res) {
+      var savedHost = null;
+      if (storage_res && storage_res.value !== null && typeof(storage_res.value) !== "undefined" && storage_res !== "") {
+        storage_res = typeof(storage_res) === "string" ? JSON.parse(storage_res) : storage_res;
+        storage_res.value = typeof(storage_res.value) === "string" ? JSON.parse(storage_res.value) : storage_res.value;
+        if (storage_res.value.init) {
+          app_props.init = storage_res.value.init;
+        } else {
+          //keep it backward compatible.
+          app_props.init = typeof(storage_res.value) === "string" ? JSON.parse(storage_res.value) : storage_res.value;
+        }
+        if (storage_res.value.hosts) {
+          savedHost = storage_res.value;
+        }
+      }
+
+      doInit(path, app_props, savedHost, storage);
+    });
+  } catch (e) {
+    //for whatever reason (e.g. localStorage is disabled) Lawnchair is failed to init, just do the init
+    doInit(path, app_props, null, null);
+  }
 };
 
 module.exports = {
   "init": init,
   "loadCloudProps": loadCloudProps
 }
-},{"../../libs/generated/lawnchair":2,"./ajax":17,"./appProps":23,"./constants":25,"./fhparams":29,"./findFHPath":30,"./handleError":31,"./lawnchair-ext":34,"./loadScript":35,"./security/hash":41,"JSON":3,"console":8}],34:[function(_dereq_,module,exports){
+},{"../../libs/generated/lawnchair":2,"./ajax":18,"./appProps":25,"./constants":27,"./events":30,"./fhparams":31,"./handleError":32,"./lawnchair-ext":35,"./loadScript":36,"./logger":37,"./security/hash":43,"JSON":3}],35:[function(_dereq_,module,exports){
 var Lawnchair = _dereq_('../../libs/generated/lawnchair');
 
 var fileStorageAdapter = function (app_props, hashFunc) {
@@ -8372,7 +9190,7 @@ var addAdapter = function(app_props, hashFunc){
 module.exports = {
   addAdapter: addAdapter
 }
-},{"../../libs/generated/lawnchair":2}],35:[function(_dereq_,module,exports){
+},{"../../libs/generated/lawnchair":2}],36:[function(_dereq_,module,exports){
 module.exports = function (url, callback) {
   var script;
   var head = document.head || document.getElementsByTagName("head")[0] || document.documentElement;
@@ -8395,7 +9213,31 @@ module.exports = function (url, callback) {
   head.insertBefore(script, head.firstChild);
 };
 
-},{}],36:[function(_dereq_,module,exports){
+},{}],37:[function(_dereq_,module,exports){
+var console = _dereq_('console');
+var log = _dereq_('loglevel');
+
+log.setLevel('info');
+
+/**
+ * APIs:
+ * see https://github.com/pimterry/loglevel.
+ * In short, you can use:
+ * log.setLevel(loglevel) - default to info
+ * log.enableAll() - enable all log messages
+ * log.disableAll() - disable all log messages
+ *
+ * log.trace(msg)
+ * log.debug(msg)
+ * log.info(msg)
+ * log.warn(msg)
+ * log.error(msg)
+ *
+ * Available levels: { "TRACE": 0, "DEBUG": 1, "INFO": 2, "WARN": 3, "ERROR": 4, "SILENT": 5}
+ * Use either string or integer value
+ */
+module.exports = log;
+},{"console":8,"loglevel":14}],38:[function(_dereq_,module,exports){
 module.exports = [
   {
     "destination" :"ipad",
@@ -8423,9 +9265,9 @@ module.exports = [
   }
 ];
 
-},{}],37:[function(_dereq_,module,exports){
+},{}],39:[function(_dereq_,module,exports){
 module.exports = function(url) {
-  var qmap;
+  var qmap = {};
   var i = url.split("?");
   if (i.length === 2) {
     var queryString = i[1];
@@ -8439,8 +9281,7 @@ module.exports = function(url) {
   }
   return qmap;
 };
-
-},{}],38:[function(_dereq_,module,exports){
+},{}],40:[function(_dereq_,module,exports){
 var constants = _dereq_("./constants");
 
 module.exports = function() {
@@ -8453,7 +9294,7 @@ module.exports = function() {
   return type + "/" + constants.sdk_version;
 };
 
-},{"./constants":25}],39:[function(_dereq_,module,exports){
+},{"./constants":27}],41:[function(_dereq_,module,exports){
 var rsa = _dereq_("../../../libs/rsa");
 var SecureRandom = rsa.SecureRandom;
 var byte2Hex = rsa.byte2Hex;
@@ -8495,7 +9336,7 @@ var aes_keygen = function(p, s, f){
 }
 
 module.exports = aes_keygen;
-},{"../../../libs/rsa":4}],40:[function(_dereq_,module,exports){
+},{"../../../libs/rsa":4}],42:[function(_dereq_,module,exports){
 var CryptoJS = _dereq_("../../../libs/generated/crypto");
 
 var encrypt = function(p, s, f){
@@ -8536,7 +9377,7 @@ module.exports = {
   encrypt: encrypt,
   decrypt: decrypt
 }
-},{"../../../libs/generated/crypto":1}],41:[function(_dereq_,module,exports){
+},{"../../../libs/generated/crypto":1}],43:[function(_dereq_,module,exports){
 var CryptoJS = _dereq_("../../../libs/generated/crypto");
 
 
@@ -8561,7 +9402,7 @@ var hash = function(p, s, f){
 }
 
 module.exports = hash;
-},{"../../../libs/generated/crypto":1}],42:[function(_dereq_,module,exports){
+},{"../../../libs/generated/crypto":1}],44:[function(_dereq_,module,exports){
 var rsa = _dereq_("../../../libs/rsa");
 var RSAKey = rsa.RSAKey;
 
@@ -8586,13 +9427,15 @@ var encrypt = function(p, s, f){
 module.exports = {
   encrypt: encrypt
 }
-},{"../../../libs/rsa":4}],43:[function(_dereq_,module,exports){
+},{"../../../libs/rsa":4}],45:[function(_dereq_,module,exports){
 var JSON = _dereq_("JSON");
-var actFunc = _dereq_("./api_act");
+var actAPI = _dereq_("./api_act");
+var cloudAPI = _dereq_("./api_cloud");
 var CryptoJS = _dereq_("../../libs/generated/crypto");
 var Lawnchair = _dereq_('../../libs/generated/lawnchair');
 
 var self = {
+
   // CONFIG
   defaults: {
     "sync_frequency": 10,
@@ -8616,15 +9459,27 @@ var self = {
     "notify_remote_update_applied": true,
     // Should a notification event be triggered when an update was applied to the remote data store
     "notify_delta_received": true,
-    // Should a notification event be triggered when a delta was received from the remote data store (dataset or record - depending on whether uid is set)
+    // Should a notification event be triggered when a delta was received from the remote data store for the dataset 
+    "notify_record_delta_received": true,
+    // Should a notification event be triggered when a delta was received from the remote data store for a record
     "notify_sync_failed": true,
     // Should a notification event be triggered when the sync loop failed to complete
     "do_console_log": false,
     // Should log statements be written to console.log
     "crashed_count_wait" : 10,
     // How many syncs should we check for updates on crashed in flight updates before we give up searching
-    "resend_crashed_updates" : true
+    "resend_crashed_updates" : true,
     // If we have reached the crashed_count_wait limit, should we re-try sending the crashed in flight pending record
+    "sync_active" : true,
+    // Is the background sync with the cloud currently active
+    "storage_strategy" : "html5-filesystem",
+    // Storage strategy to use for Lawnchair - supported strategies are 'html5-filesystem' and 'dom'
+    "file_system_quota" : 50 * 1024 * 1204,
+    // Amount of space to request from the HTML5 filesystem API when running in browser
+    "has_custom_sync" : null,
+    //If the app has custom cloud sync function, it should be set to true. If set to false, the default mbaas sync implementation will be used. When set to null or undefined, 
+    //a check will be performed to determine which implementation to use
+    "icloud_backup" : false //ios only. If set to true, the file will be backed by icloud
   },
 
   notifications: {
@@ -8645,7 +9500,9 @@ var self = {
     "LOCAL_UPDATE_APPLIED": "local_update_applied",
     // An update was applied to the local data store
     "DELTA_RECEIVED": "delta_received",
-    // A delta was received from the remote data store (dataset or record - depending on whether uid is set)
+    // A delta was received from the remote data store for the dataset 
+    "RECORD_DELTA_RECEIVED": "record_delta_received",
+    // A delta was received from the remote data store for the record 
     "SYNC_FAILED": "sync_failed"
     // Sync loop failed to complete
   },
@@ -8655,52 +9512,76 @@ var self = {
   // Initialise config to default values;
   config: undefined,
 
+  //TODO: deprecate this
   notify_callback: undefined,
+
+  notify_callback_map : {},
+
+  init_is_called: false,
 
   // PUBLIC FUNCTION IMPLEMENTATIONS
   init: function(options) {
     self.consoleLog('sync - init called');
+
     self.config = JSON.parse(JSON.stringify(self.defaults));
     for (var i in options) {
       self.config[i] = options[i];
     }
-    self.datasetMonitor();
+
+    //prevent multiple monitors from created if init is called multiple times
+    if(!self.init_is_called){
+      self.init_is_called = true;
+      self.datasetMonitor();
+    }
   },
 
-  notify: function(callback) {
-    self.notify_callback = callback;
+  notify: function(datasetId, callback) {
+    if(arguments.length === 1 && typeof datasetId === 'function'){
+      self.notify_callback = datasetId;
+    } else {
+      self.notify_callback_map[datasetId] = callback;
+    }
   },
 
-  manage: function(dataset_id, options, query_params) {
+  manage: function(dataset_id, options, query_params, meta_data, cb) {
+    self.consoleLog('manage - START');
+
+    var options = options || {};
+
     var doManage = function(dataset) {
       self.consoleLog('doManage dataset :: initialised = ' + dataset.initialised + " :: " + dataset_id + ' :: ' + JSON.stringify(options));
 
-      // Make sure config is initialised
-      if( ! self.config ) {
-        self.config = JSON.parse(JSON.stringify(self.defaults));
-      }
+      var datasetConfig = self.setOptions(options);
 
-      var datasetConfig = JSON.parse(JSON.stringify(self.config));
-      for (var k in options) {
-        datasetConfig[k] = options[k];
-      }
-
-      dataset.query_params = query_params || {};
+      dataset.query_params = query_params || dataset.query_params || {};
+      dataset.meta_data = meta_data || dataset.meta_data || {};
       dataset.config = datasetConfig;
       dataset.syncRunning = false;
       dataset.syncPending = true;
       dataset.initialised = true;
-      dataset.meta = {};
-      self.saveDataSet(dataset_id);
+      if(typeof dataset.meta === "undefined"){
+        dataset.meta = {};
+      }
+
+      self.saveDataSet(dataset_id, function() {
+
+        if( cb ) {
+          cb();
+        }
+      });
     };
 
     // Check if the dataset is already loaded
     self.getDataSet(dataset_id, function(dataset) {
+      self.consoleLog('manage - dataset already loaded');
       doManage(dataset);
     }, function(err) {
+      self.consoleLog('manage - dataset not loaded... trying to load');
 
       // Not already loaded, try to load from local storage
       self.loadDataSet(dataset_id, function(dataset) {
+          self.consoleLog('manage - dataset loaded from local storage');
+
           // Loading from local storage worked
 
           // Fire the local update event to indicate that dataset was loaded from local storage
@@ -8711,33 +9592,57 @@ var self = {
         },
         function(err) {
           // No dataset in memory or local storage - create a new one and put it in memory
-          self.consoleLog('Creating new dataset for id ' + dataset_id);
+          self.consoleLog('manage - Creating new dataset for id ' + dataset_id);
           var dataset = {};
+          dataset.data = {};
           dataset.pending = {};
+          dataset.meta = {};
           self.datasets[dataset_id] = dataset;
           doManage(dataset);
         });
     });
   },
 
+  setOptions: function(options) {
+    // Make sure config is initialised
+    if( ! self.config ) {
+      self.config = JSON.parse(JSON.stringify(self.defaults));
+    }
+
+    var datasetConfig = JSON.parse(JSON.stringify(self.config));
+    var optionsIn = JSON.parse(JSON.stringify(options));
+    for (var k in optionsIn) {
+      datasetConfig[k] = optionsIn[k];
+    }
+
+    return datasetConfig;
+  },
+
   list: function(dataset_id, success, failure) {
     self.getDataSet(dataset_id, function(dataset) {
-      if (dataset) {
+      if (dataset && dataset.data) {
         // Return a copy of the dataset so updates will not automatically make it back into the dataset
         var res = JSON.parse(JSON.stringify(dataset.data));
         success(res);
+      } else {
+        if(failure) failure('no_data');
       }
     }, function(code, msg) {
-      failure(code, msg);
+      if(failure) failure(code, msg);
     });
   },
 
   create: function(dataset_id, data, success, failure) {
+    if(data == null){
+      if(failure){
+        return failure("null_data");
+      }
+    }
     self.addPendingObj(dataset_id, null, data, "create", success, failure);
   },
 
   read: function(dataset_id, uid, success, failure) {
-      self.getDataSet(dataset_id, function(dataset) {
+    self.getDataSet(dataset_id, function(dataset) {
       var rec = dataset.data[uid];
       if (!rec) {
         failure("unknown_uid");
@@ -8747,7 +9652,7 @@ var self = {
         success(res);
       }
     }, function(code, msg) {
-      failure(code, msg);
+      if(failure) failure(code, msg);
     });
   },
 
@@ -8767,7 +9672,7 @@ var self = {
       }
       cb(res);
     }, function(err, datatset_id) {
-        self.ConsoleLog(err);
+        self.consoleLog(err);
     });
   },
 
@@ -8779,22 +9684,28 @@ var self = {
   },
 
   listCollisions : function(dataset_id, success, failure){
-    actFunc({
-      "act": dataset_id,
-      "req": {
-        "fn": "listCollisions"
-      }
-    }, success, failure);
+    self.getDataSet(dataset_id, function(dataset) {
+      self.doCloudCall({
+        "dataset_id": dataset_id,
+        "req": {
+          "fn": "listCollisions",
+          "meta_data" : dataset.meta_data
+        }
+      }, success, failure);
+    }, failure);
   },
 
   removeCollision: function(dataset_id, colissionHash, success, failure) {
-    actFunc({
-      "act": dataset_id,
-      "req": {
-        "fn": "removeCollision",
-        "hash": colissionHash
-      }
-    }, success, failure);
+    self.getDataSet(dataset_id, function(dataset) {
+      self.doCloudCall({
+        "dataset_id" : dataset_id,
+        "req": {
+          "fn": "removeCollision",
+          "hash": colissionHash,
+          meta_data: dataset.meta_data
+        }
+      }, success, failure);
+    });
   },
 
 
@@ -8823,7 +9734,8 @@ var self = {
 
   doNotify: function(dataset_id, uid, code, message) {
 
-    if( self.notify_callback ) {
+    if( self.notify_callback || self.notify_callback_map[dataset_id]) {
+      var notifyFunc = self.notify_callback_map[dataset_id] || self.notify_callback;
       if ( self.config['notify_' + code] ) {
         var notification = {
           "dataset_id" : dataset_id,
@@ -8833,7 +9745,7 @@ var self = {
         };
         // make sure user doesn't block
         setTimeout(function () {
-          self.notify_callback(notification);
+          notifyFunc(notification);
         }, 0);
       }
     }
@@ -8845,7 +9757,142 @@ var self = {
     if (dataset) {
       success(dataset);
     } else {
-      failure('unknown_dataset' + dataset_id, dataset_id);
+      if(failure){
+        failure('unknown_dataset ' + dataset_id, dataset_id);
+      }
+    }
+  },
+
+  getQueryParams: function(dataset_id, success, failure) {
+    var dataset = self.datasets[dataset_id];
+
+    if (dataset) {
+      success(dataset.query_params);
+    } else {
+      if(failure){
+        failure('unknown_dataset ' + dataset_id, dataset_id);
+      }
+    }
+  },
+
+  setQueryParams: function(dataset_id, queryParams, success, failure) {
+    var dataset = self.datasets[dataset_id];
+
+    if (dataset) {
+      dataset.query_params = queryParams;
+      self.saveDataSet(dataset_id);
+      if( success ) {
+        success(dataset.query_params);
+      }
+    } else {
+      if ( failure ) {
+        failure('unknown_dataset ' + dataset_id, dataset_id);
+      }
+    }
+  },
+
+  getMetaData: function(dataset_id, success, failure) {
+    var dataset = self.datasets[dataset_id];
+
+    if (dataset) {
+      success(dataset.meta_data);
+    } else {
+      if(failure){
+        failure('unknown_dataset ' + dataset_id, dataset_id);
+      }
+    }
+  },
+
+  setMetaData: function(dataset_id, metaData, success, failure) {
+    var dataset = self.datasets[dataset_id];
+
+    if (dataset) {
+      dataset.meta_data = metaData;
+      self.saveDataSet(dataset_id);
+      if( success ) {
+        success(dataset.meta_data);
+      }
+    } else {
+      if( failure ) {
+        failure('unknown_dataset ' + dataset_id, dataset_id);
+      }
+    }
+  },
+
+  getConfig: function(dataset_id, success, failure) {
+    var dataset = self.datasets[dataset_id];
+
+    if (dataset) {
+      success(dataset.config);
+    } else {
+      if(failure){
+        failure('unknown_dataset ' + dataset_id, dataset_id);
+      }
+    }
+  },
+
+  setConfig: function(dataset_id, config, success, failure) {
+    var dataset = self.datasets[dataset_id];
+
+    if (dataset) {
+      var fullConfig = self.setOptions(config);
+      dataset.config = fullConfig;
+      self.saveDataSet(dataset_id);
+      if( success ) {
+        success(dataset.config);
+      }
+    } else {
+      if( failure ) {
+        failure('unknown_dataset ' + dataset_id, dataset_id);
+      }
+    }
+  },
+
+  stopSync: function(dataset_id, success, failure) {
+    self.setConfig(dataset_id, {"sync_active" : false}, function() {
+      if( success ) {
+        success();
+      }
+    }, failure);
+  },
+
+  startSync: function(dataset_id, success, failure) {
+    self.setConfig(dataset_id, {"sync_active" : true}, function() {
+      if( success ) {
+        success();
+      }
+    }, failure);
+  },
+
+  doSync: function(dataset_id, success, failure) {
+    var dataset = self.datasets[dataset_id];
+
+    if (dataset) {
+      dataset.syncPending = true;
+      self.saveDataSet(dataset_id);
+      if( success ) {
+        success();
+      }
+    } else {
+      if( failure ) {
+        failure('unknown_dataset ' + dataset_id, dataset_id);
+      }
+    }
+  },
+
+  forceSync: function(dataset_id, success, failure) {
+    var dataset = self.datasets[dataset_id];
+
+    if (dataset) {
+      dataset.syncForced = true;
+      self.saveDataSet(dataset_id);
+      if( success ) {
+        success();
+      }
+    } else {
+      if( failure ) {
+        failure('unknown_dataset ' + dataset_id, dataset_id);
+      }
     }
   },
 
@@ -8908,14 +9955,14 @@ var self = {
 
         success(obj);
       }, function(code, msg) {
-        failure(code, msg);
+        if(failure) failure(code, msg);
       });
     }
 
     var pendingObj = {};
     pendingObj.inFlight = false;
     pendingObj.action = action;
-    pendingObj.post = data;
+    pendingObj.post = JSON.parse(JSON.stringify(data));
     pendingObj.postHash = self.generateHash(pendingObj.post);
     pendingObj.timestamp = new Date().getTime();
     if( "create" === action ) {
@@ -8928,13 +9975,16 @@ var self = {
         pendingObj.preHash = self.generateHash(rec.data);
         storePendingObject(pendingObj);
       }, function(code, msg) {
-        failure(code, msg);
+        if(failure){
+          failure(code, msg);
+        }
       });
     }
   },
 
   syncLoop: function(dataset_id) {
     self.getDataSet(dataset_id, function(dataSet) {
+    
       // The sync loop is currently active
       dataSet.syncPending = false;
       dataSet.syncRunning = true;
@@ -8943,102 +9993,115 @@ var self = {
 
       self.isOnline(function(online) {
         if (!online) {
-          self.syncComplete(dataset_id, "offline");
+          self.syncComplete(dataset_id, "offline", self.notifications.SYNC_FAILED);
         } else {
-          var syncLoopParams = {};
-          syncLoopParams.fn = 'sync';
-          syncLoopParams.dataset_id = dataset_id;
-          syncLoopParams.query_params = dataSet.query_params;
-          //var datasetHash = self.generateLocalDatasetHash(dataSet);
-          syncLoopParams.dataset_hash = dataSet.hash;
-          syncLoopParams.acknowledgements = dataSet.acknowledgements || [];
+          self.checkHasCustomSync(dataset_id, function() {
 
-          var pending = dataSet.pending;
-          var pendingArray = [];
-          for(var i in pending ) {
-            // Mark the pending records we are about to submit as inflight and add them to the array for submission
-            // Don't re-add previous inFlight pending records who whave crashed - i.e. who's current state is unknown
-            if( !pending[i].inFlight && !pending[i].crashed ) {
-              pending[i].inFlight = true;
-              pending[i].inFlightDate = new Date().getTime();
-              pendingArray.push(pending[i]);
+            var syncLoopParams = {};
+            syncLoopParams.fn = 'sync';
+            syncLoopParams.dataset_id = dataset_id;
+            syncLoopParams.query_params = dataSet.query_params;
+            syncLoopParams.config = dataSet.config;
+            syncLoopParams.meta_data = dataSet.meta_data;
+            //var datasetHash = self.generateLocalDatasetHash(dataSet);
+            syncLoopParams.dataset_hash = dataSet.hash;
+            syncLoopParams.acknowledgements = dataSet.acknowledgements || [];
+
+            var pending = dataSet.pending;
+            var pendingArray = [];
+            for(var i in pending ) {
+              // Mark the pending records we are about to submit as inflight and add them to the array for submission
+              // Don't re-add previous inFlight pending records who whave crashed - i.e. who's current state is unknown
+              // Don't add delayed records
+              if( !pending[i].inFlight && !pending[i].crashed && !pending[i].delayed) {
+                pending[i].inFlight = true;
+                pending[i].inFlightDate = new Date().getTime();
+                pendingArray.push(pending[i]);
+              }
             }
-          }
-          syncLoopParams.pending = pendingArray;
+            syncLoopParams.pending = pendingArray;
 
-          if( pendingArray.length > 0 ) {
-            self.consoleLog('Starting sync loop - global hash = ' + dataSet.hash + ' :: params = ' + JSON.stringify(syncLoopParams, null, 2));
-          }
-          try {
-            actFunc({
-              'act': dataset_id,
-              'req': syncLoopParams
-            }, function(res) {
-              var rec;
+            if( pendingArray.length > 0 ) {
+              self.consoleLog('Starting sync loop - global hash = ' + dataSet.hash + ' :: params = ' + JSON.stringify(syncLoopParams, null, 2));
+            }
+            try {
+              self.doCloudCall({
+                'dataset_id': dataset_id,
+                'req': syncLoopParams
+              }, function(res) {
+                var rec;
 
-              function processUpdates(updates, notification, acknowledgements) {
-                if( updates ) {
-                  for (var up in updates) {
-                    rec = updates[up];
-                    acknowledgements.push(rec);
-                    if( dataSet.pending[up] && dataSet.pending[up].inFlight && !dataSet.pending[up].crashed ) {
-                      delete dataSet.pending[up];
-                      self.doNotify(dataset_id, rec.uid, notification, rec);
+                function processUpdates(updates, notification, acknowledgements) {
+                  if( updates ) {
+                    for (var up in updates) {
+                      rec = updates[up];
+                      acknowledgements.push(rec);
+                      if( dataSet.pending[up] && dataSet.pending[up].inFlight && !dataSet.pending[up].crashed ) {
+                        delete dataSet.pending[up];
+                        self.doNotify(dataset_id, rec.uid, notification, rec);
+                      }
                     }
                   }
                 }
-              }
 
-              // Check to see if any new pending records need to be updated to reflect the current state of play.
-              self.updatePendingFromNewData(dataset_id, dataSet, res);
+                // Check to see if any new pending records need to be updated to reflect the current state of play.
+                self.updatePendingFromNewData(dataset_id, dataSet, res);
 
-              // Check to see if any previously crashed inflight records can now be resolved
-              self.updateCrashedInFlightFromNewData(dataset_id, dataSet, res);
+                // Check to see if any previously crashed inflight records can now be resolved
+                self.updateCrashedInFlightFromNewData(dataset_id, dataSet, res);
 
-              // Update the new dataset with details of any inflight updates which we have not received a response on
-              self.updateNewDataFromInFlight(dataset_id, dataSet, res);
+                //Check to see if any delayed pending records can now be set to ready
+                self.updateDelayedFromNewData(dataset_id, dataSet, res);
 
-              // Update the new dataset with details of any pending updates
-              self.updateNewDataFromPending(dataset_id, dataSet, res);
+                //Check meta data as well to make sure it contains the correct info
+                self.updateMetaFromNewData(dataset_id, dataSet, res);
 
-              if (res.records) {
-                // Full Dataset returned
-                dataSet.data = res.records;
-                dataSet.hash = res.hash;
+                // Update the new dataset with details of any inflight updates which we have not received a response on
+                self.updateNewDataFromInFlight(dataset_id, dataSet, res);
 
-                self.doNotify(dataset_id, res.hash, self.notifications.DELTA_RECEIVED, 'full dataset');
-              }
+                // Update the new dataset with details of any pending updates
+                self.updateNewDataFromPending(dataset_id, dataSet, res);
 
-              if (res.updates) {
-                var acknowledgements = [];
-                processUpdates(res.updates.applied, self.notifications.REMOTE_UPDATE_APPLIED, acknowledgements);
-                processUpdates(res.updates.failed, self.notifications.REMOTE_UPDATE_FAILED, acknowledgements);
-                processUpdates(res.updates.collisions, self.notifications.COLLISION_DETECTED, acknowledgements);
-                dataSet.acknowledgements = acknowledgements;
-              }
 
-              else if (res.hash && res.hash !== dataSet.hash) {
-                self.consoleLog("Local dataset stale - syncing records :: local hash= " + dataSet.hash + " - remoteHash=" + res.hash);
-                // Different hash value returned - Sync individual records
-                self.syncRecords(dataset_id);
-              } else {
-                self.consoleLog("Local dataset up to date");
-              }
-              self.syncComplete(dataset_id,  "online");
-            }, function(msg, err) {
-              // The AJAX call failed to complete succesfully, so the state of the current pending updates is unknown
-              // Mark them as "crashed". The next time a syncLoop completets successfully, we will review the crashed
-              // records to see if we can determine their current state.
-              self.markInFlightAsCrashed(dataSet);
-              self.consoleLog("syncLoop failed : msg=" + msg + " :: err = " + err);
-              self.doNotify(dataset_id, null, self.notifications.SYNC_FAILED, msg);
-              self.syncComplete(dataset_id,  msg);
-            });
-          }
-          catch (e) {
-            self.consoleLog('Error performing sync - ' + e);
-            self.syncComplete(dataset_id, e);
-          }
+
+                if (res.records) {
+                  // Full Dataset returned
+                  dataSet.data = res.records;
+                  dataSet.hash = res.hash;
+
+                  self.doNotify(dataset_id, res.hash, self.notifications.DELTA_RECEIVED, 'full dataset');
+                }
+
+                if (res.updates) {
+                  var acknowledgements = [];
+                  processUpdates(res.updates.applied, self.notifications.REMOTE_UPDATE_APPLIED, acknowledgements);
+                  processUpdates(res.updates.failed, self.notifications.REMOTE_UPDATE_FAILED, acknowledgements);
+                  processUpdates(res.updates.collisions, self.notifications.COLLISION_DETECTED, acknowledgements);
+                  dataSet.acknowledgements = acknowledgements;
+                }
+
+                if (!res.records && res.hash && res.hash !== dataSet.hash) {
+                  self.consoleLog("Local dataset stale - syncing records :: local hash= " + dataSet.hash + " - remoteHash=" + res.hash);
+                  // Different hash value returned - Sync individual records
+                  self.syncRecords(dataset_id);
+                } else {
+                  self.consoleLog("Local dataset up to date");
+                  self.syncComplete(dataset_id,  "online", self.notifications.SYNC_COMPLETE);
+                }
+              }, function(msg, err) {
+                // The AJAX call failed to complete succesfully, so the state of the current pending updates is unknown
+                // Mark them as "crashed". The next time a syncLoop completets successfully, we will review the crashed
+                // records to see if we can determine their current state.
+                self.markInFlightAsCrashed(dataSet);
+                self.consoleLog("syncLoop failed : msg=" + msg + " :: err = " + err);
+                self.syncComplete(dataset_id, msg, self.notifications.SYNC_FAILED);
+              });
+            }
+            catch (e) {
+              self.consoleLog('Error performing sync - ' + e);
+              self.syncComplete(dataset_id, e, self.notifications.SYNC_FAILED);
+            }
+          });
         }
       });
     });
@@ -9066,8 +10129,8 @@ var self = {
 
       self.consoleLog("syncRecParams :: " + JSON.stringify(syncRecParams));
 
-      actFunc({
-        'act': dataset_id,
+      self.doCloudCall({
+        'dataset_id': dataset_id,
         'req': syncRecParams
       }, function(res) {
         var i;
@@ -9075,42 +10138,44 @@ var self = {
         if (res.create) {
           for (i in res.create) {
             localDataSet[i] = {"hash" : res.create[i].hash, "data" : res.create[i].data};
-            self.doNotify(dataset_id, i, self.notifications.DELTA_RECEIVED, "create");
+            self.doNotify(dataset_id, i, self.notifications.RECORD_DELTA_RECEIVED, "create");
           }
         }
         if (res.update) {
           for (i in res.update) {
             localDataSet[i].hash = res.update[i].hash;
             localDataSet[i].data = res.update[i].data;
-            self.doNotify(dataset_id, i, self.notifications.DELTA_RECEIVED, "update");
+            self.doNotify(dataset_id, i, self.notifications.RECORD_DELTA_RECEIVED, "update");
           }
         }
         if (res['delete']) {
           for (i in res['delete']) {
             delete localDataSet[i];
-            self.doNotify(dataset_id, i, self.notifications.DELTA_RECEIVED, "delete");
+            self.doNotify(dataset_id, i, self.notifications.RECORD_DELTA_RECEIVED, "delete");
           }
         }
+
+        self.doNotify(dataset_id, res.hash, self.notifications.DELTA_RECEIVED, 'partial dataset');
 
         dataSet.data = localDataSet;
         if(res.hash) {
           dataSet.hash = res.hash;
         }
-        self.syncComplete(dataset_id, "online");
+        self.syncComplete(dataset_id, "online", self.notifications.SYNC_COMPLETE);
       }, function(msg, err) {
         self.consoleLog("syncRecords failed : msg=" + msg + " :: err=" + err);
-        self.syncComplete(dataset_id, msg);
+        self.syncComplete(dataset_id, msg, self.notifications.SYNC_FAILED);
       });
     });
   },
 
-  syncComplete: function(dataset_id, status) {
+  syncComplete: function(dataset_id, status, notification) {
 
     self.getDataSet(dataset_id, function(dataset) {
       dataset.syncRunning = false;
       dataset.syncLoopEnd = new Date().getTime();
       self.saveDataSet(dataset_id);
-      self.doNotify(dataset_id, dataset.hash, self.notifications.SYNC_COMPLETE, status);
+      self.doNotify(dataset_id, dataset.hash, notification, status);
     });
   },
 
@@ -9118,12 +10183,13 @@ var self = {
     for( var dataset_id in self.datasets ) {
       if( self.datasets.hasOwnProperty(dataset_id) ) {
         var dataset = self.datasets[dataset_id];
-
-        if( !dataset.syncRunning ) {
+        if(dataset && !dataset.syncRunning && (dataset.config.sync_active || dataset.syncForced)) {
           // Check to see if it is time for the sync loop to run again
           var lastSyncStart = dataset.syncLoopStart;
           var lastSyncCmp = dataset.syncLoopEnd;
-          if( lastSyncStart == null ) {
+          if(dataset.syncForced){
+            dataset.syncPending = true;
+          } else if( lastSyncStart == null ) {
             self.consoleLog(dataset_id +' - Performing initial sync');
             // Dataset has never been synced before - do initial sync
             dataset.syncPending = true;
@@ -9137,13 +10203,81 @@ var self = {
           }
 
           if( dataset.syncPending ) {
+            // Reset syncForced in case it was what caused the sync cycle to run.
+            dataset.syncForced = false;
+
             // If the dataset requres syncing, run the sync loop. This may be because the sync interval has passed
             // or because the sync_frequency has been changed or because a change was made to the dataset and the
             // immediate_sync flag set to true
-           self.syncLoop(dataset_id);
+            self.syncLoop(dataset_id);
           }
         }
       }
+    }
+  },
+
+  checkHasCustomSync : function(dataset_id, cb) {
+    var dataset = self.datasets[dataset_id];
+    if(dataset && dataset.config){
+      self.consoleLog("dataset.config.has_custom_sync = " + dataset.config.has_custom_sync);
+      if(dataset.config.has_custom_sync != null) {
+        return cb();
+      }
+      self.consoleLog('starting check has custom sync');
+
+      actAPI({
+        'act' : dataset_id,
+        'req': {
+          'fn': 'sync'
+        }
+      }, function(res) {
+        //if the custom sync is defined in the cloud, this call should success.
+        //if failed, we think this the custom sync is not defined
+        self.consoleLog('check has_custom_sync - success - ', res);
+        dataset.config.has_custom_sync = true;
+        return cb();
+      }, function(msg,err) {
+        self.consoleLog('check has_custom_sync - failure - ', err);
+        if(err.status && err.status === 500){
+          //if we receive 500, it could be that there is an error occured due to missing parameters or similar,
+          //but the endpoint is defined.
+          self.consoleLog('check has_custom_sync - failed with 500, endpoint does exists');
+          dataset.config.has_custom_sync = true;
+        } else {
+          dataset.config.has_custom_sync = false;
+        }
+        return cb();
+      });
+    } else {
+      return cb();
+    }
+  },
+
+  doCloudCall: function(params, success, failure) {
+    var hasCustomSync = false;
+    var dataset = self.datasets[params.dataset_id];
+    if(dataset && dataset.config){
+      hasCustomSync = dataset.config.has_custom_sync;
+    }
+    if( hasCustomSync == true ) {
+      actAPI({
+        'act' : params.dataset_id,
+        'req' : params.req
+      }, function(res) {
+        success(res);
+      }, function(msg, err) {
+        failure(msg, err);
+      });      
+    } else {
+      cloudAPI({
+        'path' : '/mbaas/sync/' + params.dataset_id,
+        'method' : 'post',
+        'data' : params.req
+      }, function(res) {
+        success(res);
+      }, function(msg, err) {
+        failure(msg, err);
+      });
     }
   },
 
@@ -9156,55 +10290,62 @@ var self = {
     }, 500);
   },
 
-  saveDataSet: function (dataset_id, cb) {
-    var onFail =  function(msg, err) {
-      // save failed
-      var errMsg = 'save to local storage failed  msg:' + msg + ' err:' + err;
+  getStorageAdapter: function(dataset_id, isSave, cb){
+    var onFail = function(msg, err){
+      var errMsg = (isSave?'save to': 'load from' ) + ' local storage failed msg: ' + msg + ' err: ' + err;
       self.doNotify(dataset_id, null, self.notifications.CLIENT_STORAGE_FAILED, errMsg);
       self.consoleLog(errMsg);
     };
+    Lawnchair({fail:onFail, adapter: self.config.storage_strategy, size:self.config.file_system_quota, backup: self.config.icloud_backup}, function(){
+      return cb(null, this);
+    });
+  },
+
+  saveDataSet: function (dataset_id, cb) {
     self.getDataSet(dataset_id, function(dataset) {
-      // save dataset to local storage
-      // the order of adapter wasn't specified previously, in this case, Lawnchair will check adapters using LIFO.
-      // If we don't specify the order of adapters here, the order of when an adapter is added to Lawnchair in grunt file or during app runing could break backward compatibility.
-      Lawnchair({fail:onFail, adapter: ["webkit-sqlite", "dom", "localFileStorage", "window-name"]}, function (){
-           this.save({key:"dataset_" + dataset_id,val:JSON.stringify(dataset)}, function(){
-             //save success
-             if( cb ) {
-               cb();
-             }
-           });
+      self.getStorageAdapter(dataset_id, true, function(err, storage){
+        storage.save({key:"dataset_" + dataset_id, val:dataset}, function(){
+          //save success
+          if(cb) return cb();
+        });
       });
     });
   },
 
   loadDataSet: function (dataset_id, success, failure) {
-    // load dataset from local storage
-    var onFail = function(msg, err) {
-      // load failed
-      var errMsg = 'load from local storage failed  msg:' + msg;
-      self.doNotify(dataset_id, null, self.notifications.CLIENT_STORAGE_FAILED, errMsg);
-      self.consoleLog(errMsg);
-    };
-
-    Lawnchair({fail:onFail, adapter: ["webkit-sqlite", "dom", "localFileStorage", "window-name"]},function (){
-       this.get( "dataset_" + dataset_id, function (data){
-         if (data && data.val !== null) {
-            var dataset = JSON.parse(data.val);
-            // Datasets should not be auto initialised when loaded - the mange function should be called for each dataset
-            // the user wants sync
-            dataset.initialised = false;
-            self.datasets[dataset_id] = dataset; // TODO: do we need to handle binary data?
-            self.consoleLog('load from local storage success for dataset_id :' + dataset_id);
-            return success(dataset);
-          } else {
-              // no data yet, probably first time. failure calback should handle this
-              return failure();
+    self.getStorageAdapter(dataset_id, false, function(err, storage){
+      storage.get( "dataset_" + dataset_id, function (data){
+        if (data && data.val) {
+          var dataset = data.val;
+          if(typeof dataset === "string"){
+            dataset = JSON.parse(dataset);
           }
-       });
+          // Datasets should not be auto initialised when loaded - the mange function should be called for each dataset
+          // the user wants sync
+          dataset.initialised = false;
+          self.datasets[dataset_id] = dataset; // TODO: do we need to handle binary data?
+          self.consoleLog('load from local storage success for dataset_id :' + dataset_id);
+          if(success) return success(dataset);
+        } else {
+          // no data yet, probably first time. failure calback should handle this
+          if(failure) return failure();
+        }
+      });
     });
   },
 
+  clearCache: function(dataset_id, cb){
+    delete self.datasets[dataset_id];
+    self.notify_callback_map[dataset_id] === null;
+    self.getStorageAdapter(dataset_id, true, function(err, storage){
+      storage.remove("dataset_" + dataset_id, function(){
+        self.consoleLog('local cache is cleared for dataset : ' + dataset_id);
+        if(cb){
+          return cb();
+        }
+      });
+    });
+  },
 
   updateDatasetFromLocal: function(dataset, pendingRec) {
     var pending = dataset.pending;
@@ -9240,13 +10381,24 @@ var self = {
           previousPendingUid = dataset.meta[uid].pendingUid;
           dataset.meta[uid].previousPendingUid = previousPendingUid;
           previousPending = pending[previousPendingUid];
-          if( previousPending && !previousPending.inFlight) {
-            self.consoleLog('existing pre-flight pending record = ' + JSON.stringify(previousPending));
-            // We are trying to perform an update on an existing pending record
-            // modify the original record to have the latest value and delete the pending update
-            previousPending.post = pendingRec.post;
-            previousPending.postHash = pendingRec.postHash;
-            delete pending[pendingRec.hash];
+          if(previousPending) {
+            if(!previousPending.inFlight){
+              self.consoleLog('existing pre-flight pending record = ' + JSON.stringify(previousPending));
+              // We are trying to perform an update on an existing pending record
+              // modify the original record to have the latest value and delete the pending update
+              previousPending.post = pendingRec.post;
+              previousPending.postHash = pendingRec.postHash;
+              delete pending[pendingRec.hash];
+              // Update the pending record to have the hash of the previous record as this is what is now being
+              // maintained in the pending array & is what we want in the meta record
+              pendingRec.hash = previousPendingUid;
+            } else {
+              //we are performing changes to a pending record which is inFlight. Until the status of this pending record is resolved,
+              //we should not submit this pending record to the cloud. Mark it as delayed.
+              self.consoleLog('existing in-inflight pending record = ' + JSON.stringify(previousPending));
+              pendingRec.delayed = true;
+              pendingRec.waiting = previousPending.hash;
+            }
           }
         }
       }
@@ -9260,22 +10412,28 @@ var self = {
           previousPendingUid = dataset.meta[uid].pendingUid;
           dataset.meta[uid].previousPendingUid = previousPendingUid;
           previousPending = pending[previousPendingUid];
-          if( previousPending && !previousPending.inFlight ) {
-            self.consoleLog('existing pending record = ' + JSON.stringify(previousPending));
-            if( previousPending.action === "create" ) {
-              // We are trying to perform a delete on an existing pending create
-              // These cancel each other out so remove them both
-              delete pending[pendingRec.hash];
-              delete pending[previousPendingUid];
-            }
-            if( previousPending.action === "update" ) {
-              // We are trying to perform a delete on an existing pending update
-              // Use the pre value from the pending update for the delete and
-              // get rid of the pending update
-              pendingRec.pre = previousPending.pre;
-              pendingRec.preHash = previousPending.preHash;
-              pendingRec.inFlight = false;
-              delete pending[previousPendingUid];
+          if( previousPending ) {
+            if(!previousPending.inFlight){
+              self.consoleLog('existing pending record = ' + JSON.stringify(previousPending));
+              if( previousPending.action === "create" ) {
+                // We are trying to perform a delete on an existing pending create
+                // These cancel each other out so remove them both
+                delete pending[pendingRec.hash];
+                delete pending[previousPendingUid];
+              }
+              if( previousPending.action === "update" ) {
+                // We are trying to perform a delete on an existing pending update
+                // Use the pre value from the pending update for the delete and
+                // get rid of the pending update
+                pendingRec.pre = previousPending.pre;
+                pendingRec.preHash = previousPending.preHash;
+                pendingRec.inFlight = false;
+                delete pending[previousPendingUid];
+              }
+            } else {
+              self.consoleLog('existing in-inflight pending record = ' + JSON.stringify(previousPending));
+              pendingRec.delayed = true;
+              pendingRec.waiting = previousPending.hash;
             }
           }
         }
@@ -9523,14 +10681,73 @@ var self = {
               }
             }
           }
-          else if (!pendingRec.inFlight && pendingRec.crashed ) {
-            self.consoleLog('updateCrashedInFlightFromNewData - Trying to resolve issues with crashed non in flight record - uid = ' + pendingRec.uid);
-            // Stalled pending record because a previous pending update on the same record crashed
-            var crashedRef = resolvedCrashes[pendingRec.uid];
-            if( crashedRef ) {
-              self.consoleLog('updateCrashedInFlightFromNewData - Found a stalled pending record backed up behind a resolved crash uid=' + pendingRec.uid + ' :: hash=' + pendingRec.hash);
-              pendingRec.crashed = false;
+        }
+      }
+    }
+  },
+
+  updateDelayedFromNewData: function(dataset_id, dataset, newData){
+    var pending = dataset.pending;
+    var pendingHash;
+    var pendingRec;
+    if(pending){
+      for( pendingHash in pending ){
+        if( pending.hasOwnProperty(pendingHash) ){
+          pendingRec = pending[pendingHash];
+          if( pendingRec.delayed && pendingRec.waiting ){
+            self.consoleLog('updateDelayedFromNewData - Found delayed pending record uid=' + pendingRec.uid + ' :: hash=' + pendingRec.hash + ' :: waiting=' + pendingRec.waiting);
+            if( newData && newData.updates && newData.updates.hashes ){
+              var waitingRec = newData.updates.hashes[pendingRec.waiting];
+              if(waitingRec){
+                self.consoleLog('updateDelayedFromNewData - Waiting pending record is resolved rec=' + JSON.stringify(waitingRec));
+                pendingRec.delayed = false;
+                pendingRec.waiting = undefined;
+              }
             }
+          }
+        }
+      }
+    }
+  },
+
+  updateMetaFromNewData: function(dataset_id, dataset, newData){
+    var meta = dataset.meta;
+    if(meta && newData && newData.updates && newData.updates.hashes){
+      for(var uid in meta){
+        if(meta.hasOwnProperty(uid)){
+          var metadata = meta[uid];
+          var pendingHash = metadata.pendingUid;
+          var previousPendingHash = metadata.previousPendingUid;
+          self.consoleLog("updateMetaFromNewData - Found metadata with uid = " + uid + " :: pendingHash = " + pendingHash + " :: previousPendingHash =" + previousPendingHash);
+          var previousPendingResolved = true;
+          var pendingResolved = true;
+          if(previousPendingHash){
+            //we have previous pending in meta data, see if it's resolved
+            previousPendingResolved = false;
+            var resolved = newData.updates.hashes[previousPendingHash];
+            if(resolved){
+              self.consoleLog("updateMetaFromNewData - Found previousPendingUid in meta data resolved - resolved = " + JSON.stringify(resolved));
+              //the previous pending is resolved in the cloud
+              metadata.previousPendingUid = undefined;
+              previousPendingResolved = true;
+            }
+          }
+          if(pendingHash){
+            //we have current pending in meta data, see if it's resolved
+            pendingResolved = false;
+            var resolved = newData.updates.hashes[pendingHash];
+            if(resolved){
+              self.consoleLog("updateMetaFromNewData - Found pendingUid in meta data resolved - resolved = " + JSON.stringify(resolved));
+              //the current pending is resolved in the cloud
+              metadata.pendingUid = undefined;
+              pendingResolved = true;
+            }
+          }
+
+          if(previousPendingResolved && pendingResolved){
+            self.consoleLog("updateMetaFromNewData - both previous and current pendings are resolved for meta data with uid " + uid + ". Delete it.");
+            //all pendings are resolved, the entry can be removed from meta data
+            delete meta[uid];
           }
         }
       }
@@ -9556,21 +10773,6 @@ var self = {
           }
         }
       }
-
-      // Check for any pending updates that would be modifying a crashed record. These can not go out until the
-      // status of the crashed record is determined
-      for( pendingHash in pending ) {
-        if( pending.hasOwnProperty(pendingHash) ) {
-          pendingRec = pending[pendingHash];
-
-          if( ! pendingRec.inFlight ) {
-            var crashedRef = crashedRecords[pendingRec.uid];
-            if( crashedRef ) {
-              pendingRec.crashed = true;
-            }
-          }
-        }
-      }
     }
   },
 
@@ -9583,6 +10785,8 @@ var self = {
 
 (function() {
   self.config = self.defaults;
+  //Initialse the sync service with default config
+  //self.init({});
 })();
 
 module.exports = {
@@ -9598,12 +10802,23 @@ module.exports = {
   removeCollision: self.removeCollision,
   getPending : self.getPending,
   clearPending : self.clearPending,
-  getDataset : self.getDataSet
+  getDataset : self.getDataSet,
+  getQueryParams: self.getQueryParams,
+  setQueryParams: self.setQueryParams,
+  getMetaData: self.getMetaData,
+  setMetaData: self.setMetaData,
+  getConfig: self.getConfig,
+  setConfig: self.setConfig,
+  startSync: self.startSync,
+  stopSync: self.stopSync,
+  doSync: self.doSync,
+  forceSync: self.forceSync,
+  generateHash: self.generateHash,
+  loadDataSet: self.loadDataSet,
+  checkHasCustomSync: self.checkHasCustomSync,
+  clearCache: self.clearCache
 };
-
-
-
-},{"../../libs/generated/crypto":1,"../../libs/generated/lawnchair":2,"./api_act":18,"JSON":3}],44:[function(_dereq_,module,exports){
+},{"../../libs/generated/crypto":1,"../../libs/generated/lawnchair":2,"./api_act":19,"./api_cloud":21,"JSON":3}],46:[function(_dereq_,module,exports){
 module.exports = {
   createUUID : function () {
     //from http://stackoverflow.com/questions/105034/how-to-create-a-guid-uuid-in-javascript
@@ -9620,65 +10835,51 @@ module.exports = {
   }
 };
 
-},{}],45:[function(_dereq_,module,exports){
+},{}],47:[function(_dereq_,module,exports){
 var initializer = _dereq_("./initializer");
 var events = _dereq_("./events");
 var CloudHost = _dereq_("./hosts");
 var constants = _dereq_("./constants");
+var logger = _dereq_("./logger");
 
-var init_attempt = 0;
+
 //the cloud configurations
 var cloud_host;
 
 var is_initialising = false;
 var is_cloud_ready = false;
+var init_error = null;
 
 
-var tryInitialise = function(retry, cb, props){
-  init_attempt++;
-  initializer.init(function(error, initRes){
-
-    if(error){
-      if(retry && init_attempt <= retry){
-        tryInitialise(retry, cb);
-      } else {
-        return cb(error);
-      }
-    } else {
-      cloud_host = new CloudHost(initRes.cloud);
-      return cb(null, cloud_host);
-    }
-  }, props);
-}
-
-var ready = function(cb, retry, app_props){
-  var props = app_props;
-  var tries = retry;
-  if(typeof retry === "object"){
-    props = retry;
-    tries = 0;
-  }
+var ready = function(cb){
   if(is_cloud_ready){
     return cb(null, {host: getCloudHostUrl()});
   } else {
-    events.once('cloudready', function(host){
-      return cb(null, host);
-    });
-    events.once('error', function(error){
-      return cb(error);
+    events.once(constants.INIT_EVENT, function(err, host){
+      return cb(err, host);
     });
     if(!is_initialising){
       is_initialising = true;
-      init_attempt = 0;
-      tryInitialise(tries, function(err, data){
-        is_initialising = false;
-        if(err){
-          return events.emit("error", err);
-        } else {
-          is_cloud_ready = true;
-          return events.emit("cloudready", {host: getCloudHostUrl()});
-        }
-      }, props);
+      var fhinit = function(){
+        initializer.init(function(err, initRes){
+          is_initialising = false;
+          if(err){
+            init_error = err;
+            return events.emit(constants.INIT_EVENT, err);
+          } else {
+            init_error = null;
+            is_cloud_ready = true;
+            cloud_host = new CloudHost(initRes.cloud);
+            return events.emit(constants.INIT_EVENT, null, {host: getCloudHostUrl()});
+          }
+        });
+      }
+      if(typeof window.cordova !== "undefined" || typeof window.phonegap !== "undefined"){
+        //if we are running inside cordova/phonegap, only init after device is ready to ensure the device id is the right one
+        document.addEventListener("deviceready", fhinit, false);
+      } else {
+        fhinit();
+      }
     }
   }
 }
@@ -9700,22 +10901,30 @@ var isReady = function(){
   return is_cloud_ready;
 }
 
+var getInitError = function(){
+  return init_error;
+}
+
 //for test
 var reset = function(){
   is_cloud_ready = false;
   is_initialising = false;
   cloud_host = undefined;
+  init_error = undefined;
+  ready(function(){
+    
+  });
 }
 
 ready(function(error, host){
   if(error){
     if(error.message !== "app_config_missing"){
-      console.error("Failed to initialise fh.");
+      logger.error("Failed to initialise fh.");
     } else {
-      console.log("No fh config file");
+      logger.info("No fh config file");
     }
   } else {
-    console.log("fh cloud is ready");
+    logger.info("fh cloud is ready");
   }
 });
 
@@ -9724,8 +10933,9 @@ module.exports = {
   isReady: isReady,
   getCloudHost: getCloudHost,
   getCloudHostUrl: getCloudHostUrl,
+  getInitError: getInitError,
   reset: reset
 }
-},{"./appProps":23,"./constants":25,"./events":28,"./hosts":32,"./initializer":33}]},{},[15])
-(15)
+},{"./appProps":25,"./constants":27,"./events":30,"./hosts":33,"./initializer":34,"./logger":37}]},{},[16])
+(16)
 });
