@@ -1,0 +1,9 @@
+{
+  "plugins": [
+    {
+      "id": "org.jboss.aerogear.cordova.push",
+      "version": "2.x-compat",
+      "url": "https://github.com/aerogear/aerogear-cordova-push#2.x-compat"
+    }
+  ]
+}
