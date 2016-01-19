@@ -8,4 +8,5 @@
     <access origin="*" />
     <preference name="fullscreen" value="true" />
     <preference name="webviewbounce" value="true" />
+    <plugin name="cordova-plugin-whitelist" spec="1.2.0" />
 </widget>
