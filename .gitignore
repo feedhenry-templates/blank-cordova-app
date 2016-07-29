@@ -16,7 +16,6 @@ client/default/archive
 ios/www/*
 *.swp
 *.lock
-www/main.js
 
 ####
 # Xcode temporary files that should never be committed
