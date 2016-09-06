@@ -10,7 +10,7 @@
 /docs
 /resources/docs
 /docs/*
-node_modules
+/node_modules
 fhc-*
 client/default/archive
 ios/www/*
