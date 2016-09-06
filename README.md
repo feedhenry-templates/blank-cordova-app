@@ -1,4 +1,4 @@
-# Blank Corodva Template 
+# Blank Cordova Template 
 ---------
 Author: Erik Jan de Wit   
 Level: Intermediate   
