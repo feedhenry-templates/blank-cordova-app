@@ -1,3 +1,6 @@
+# DEPRECATED See https://github.com/feedhenry-templates/helloworld-app for a maintained version of this template
+
+
 # Blank Cordova Template 
 ---------
 Author: Erik Jan de Wit   
